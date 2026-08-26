@@ -9,6 +9,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Exponential backoff** + jitter (thundering herd’ü önler)
 - Maksimum deneme sayısı ve toplam zaman aşımı kontrolü
 - Belirli exception türlerini yakalama / yok sayma
+- **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı (ör. sadece HTTP 429/503)
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
 - **RetryError**: son exception + deneme sayısını birlikte taşıyan sarmalayıcı
@@ -46,6 +47,39 @@ result = attempt(
     base_delay=1.0,
     exceptions=(requests.RequestException,),
 )
+```
+
+### İnce taneli kontrol: `retry_if`
+
+Sadece belirli durum kodlarında yeniden denemek için:
+
+```python
+from attempt import attempt
+
+def should_retry(exc: BaseException) -> bool:
+    # Örnek: HTTP hata nesnesinde status_code varsa sadece 429/503’te dene
+    code = getattr(exc, "status_code", None)
+    return code in (429, 503)
+
+result = attempt(
+    lambda: call_api(),
+    max_attempts=5,
+    base_delay=1.0,
+    exceptions=(Exception,),
+    retry_if=should_retry,
+)
+```
+
+Decorator ile:
+
+```python
+@retry(
+    max_attempts=5,
+    base_delay=0.5,
+    retry_if=lambda e: "rate limit" in str(e).lower(),
+)
+def fetch():
+    ...
 ```
 
 ### Async kullanım
@@ -89,6 +123,7 @@ except RetryError as e:
 | `exponential_base`        | `2.0`          | Üstel çarpan                                  |
 | `jitter`                  | `True`         | Rastgele ±%25 jitter ekle                     |
 | `exceptions`              | `(Exception,)` | Yakalanacak exception sınıfları               |
+| `retry_if`                | `None`         | `exc -> bool`; False ise hemen yükselt        |
 | `on_retry`                | `None`         | Her yeniden denemede çağrılacak callback      |
 | `timeout`                 | `None`         | Toplam maksimum çalışma süresi (saniye)       |
 | `reraise_as_retry_error`  | `False`        | Başarısızlıkta `RetryError` yükselt           |

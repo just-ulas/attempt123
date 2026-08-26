@@ -4,6 +4,7 @@
 - Exponential backoff + opsiyonel jitter
 - Maksimum deneme sayısı ve toplam zaman aşımı
 - Belirli exception türlerini filtreleme
+- Opsiyonel retry_if predicate ile ince taneli kontrol
 - Decorator ve fonksiyon arayüzü (sync + async)
 - RetryError: son exception + deneme sayısı ile sarmalama
 """
@@ -18,6 +19,7 @@ from typing import Any, Awaitable, Callable, Optional, Tuple, Type, TypeVar, Uni
 
 T = TypeVar("T")
 ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException], ...]]
+RetryPredicate = Callable[[BaseException], bool]
 
 
 class RetryError(Exception):
@@ -37,9 +39,6 @@ class RetryError(Exception):
         )
         super().__init__(message)
 
-    def __cause__(self) -> BaseException:  # type: ignore[override]
-        return self.last_exception
-
 
 def _compute_delay(
     attempt_number: int,
@@ -56,6 +55,13 @@ def _compute_delay(
     return max(0.0, delay)
 
 
+def _should_retry(exc: BaseException, retry_if: Optional[RetryPredicate]) -> bool:
+    """retry_if verilmişse onu kullan; yoksa her zaman True."""
+    if retry_if is None:
+        return True
+    return bool(retry_if(exc))
+
+
 def attempt(
     func: Callable[..., T],
     *,
@@ -65,6 +71,7 @@ def attempt(
     exponential_base: float = 2.0,
     jitter: bool = True,
     exceptions: ExceptionType = (Exception,),
+    retry_if: Optional[RetryPredicate] = None,
     on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
     timeout: Optional[float] = None,
     reraise_as_retry_error: bool = False,
@@ -80,6 +87,9 @@ def attempt(
         exponential_base: Üstel çarpan (genelde 2.0).
         jitter: True ise rastgele ±%25 jitter eklenir.
         exceptions: Yakalanacak exception sınıf(lar)ı.
+        retry_if: Opsiyonel predicate. Yakalanan exception için
+                  True dönerse yeniden dene, False dönerse hemen yükselt.
+                  Örnek: lambda e: getattr(e, "status_code", None) in (429, 503)
         on_retry: Her yeniden denemeden önce çağrılır:
                   on_retry(attempt_number, exception, delay_seconds)
         timeout: Toplam maksimum çalışma süresi (saniye). Aşılırsa
@@ -111,7 +121,7 @@ def attempt(
             return func()
         except exceptions as exc:
             last_exc = exc
-            if attempt_num >= max_attempts:
+            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
                 if reraise_as_retry_error:
                     raise RetryError(exc, attempt_num) from exc
                 raise
@@ -148,6 +158,7 @@ def retry(
     exponential_base: float = 2.0,
     jitter: bool = True,
     exceptions: ExceptionType = (Exception,),
+    retry_if: Optional[RetryPredicate] = None,
     on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
     timeout: Optional[float] = None,
     reraise_as_retry_error: bool = False,
@@ -172,6 +183,7 @@ def retry(
                 exponential_base=exponential_base,
                 jitter=jitter,
                 exceptions=exceptions,
+                retry_if=retry_if,
                 on_retry=on_retry,
                 timeout=timeout,
                 reraise_as_retry_error=reraise_as_retry_error,
@@ -191,6 +203,7 @@ async def async_attempt(
     exponential_base: float = 2.0,
     jitter: bool = True,
     exceptions: ExceptionType = (Exception,),
+    retry_if: Optional[RetryPredicate] = None,
     on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
     timeout: Optional[float] = None,
     reraise_as_retry_error: bool = False,
@@ -226,7 +239,7 @@ async def async_attempt(
             return await func()
         except exceptions as exc:
             last_exc = exc
-            if attempt_num >= max_attempts:
+            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
                 if reraise_as_retry_error:
                     raise RetryError(exc, attempt_num) from exc
                 raise
@@ -261,6 +274,7 @@ def async_retry(
     exponential_base: float = 2.0,
     jitter: bool = True,
     exceptions: ExceptionType = (Exception,),
+    retry_if: Optional[RetryPredicate] = None,
     on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
     timeout: Optional[float] = None,
     reraise_as_retry_error: bool = False,
@@ -285,6 +299,7 @@ def async_retry(
                 exponential_base=exponential_base,
                 jitter=jitter,
                 exceptions=exceptions,
+                retry_if=retry_if,
                 on_retry=on_retry,
                 timeout=timeout,
                 reraise_as_retry_error=reraise_as_retry_error,

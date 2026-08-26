@@ -145,6 +145,66 @@ def test_reraise_as_retry_error():
     assert fn.call_count == 3
 
 
+def test_retry_if_skips_non_matching():
+    """retry_if False dönerse hemen yükseltmeli, yeniden denememeli."""
+
+    class HttpError(Exception):
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            super().__init__(f"HTTP {status_code}")
+
+    fn = Mock(side_effect=HttpError(400))
+    with pytest.raises(HttpError):
+        attempt(
+            fn,
+            max_attempts=5,
+            base_delay=0.01,
+            jitter=False,
+            retry_if=lambda e: getattr(e, "status_code", None) in (429, 503),
+        )
+    assert fn.call_count == 1
+
+
+def test_retry_if_allows_matching():
+    """retry_if True dönerse normal şekilde yeniden denemeli."""
+
+    class HttpError(Exception):
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            super().__init__(f"HTTP {status_code}")
+
+    fn = Mock(side_effect=[HttpError(503), HttpError(503), "ok"])
+    result = attempt(
+        fn,
+        max_attempts=5,
+        base_delay=0.01,
+        jitter=False,
+        retry_if=lambda e: getattr(e, "status_code", None) in (429, 503),
+    )
+    assert result == "ok"
+    assert fn.call_count == 3
+
+
+def test_retry_if_with_decorator():
+    """@retry decorator üzerinde retry_if çalışmalı."""
+    calls = []
+
+    @retry(
+        max_attempts=4,
+        base_delay=0.01,
+        jitter=False,
+        retry_if=lambda e: "geçici" in str(e),
+    )
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("geçici hata")
+        return "done"
+
+    assert flaky() == "done"
+    assert len(calls) == 3
+
+
 @pytest.mark.asyncio
 async def test_async_successful_first_try():
     """Async: ilk denemede başarılı."""
@@ -202,3 +262,18 @@ async def test_async_reraise_as_retry_error():
         )
     assert exc_info.value.attempts == 2
     assert isinstance(exc_info.value.last_exception, OSError)
+
+
+@pytest.mark.asyncio
+async def test_async_retry_if():
+    """Async: retry_if False dönerse hemen yükseltmeli."""
+    fn = AsyncMock(side_effect=ValueError("kalıcı"))
+    with pytest.raises(ValueError, match="kalıcı"):
+        await async_attempt(
+            fn,
+            max_attempts=5,
+            base_delay=0.01,
+            jitter=False,
+            retry_if=lambda e: "geçici" in str(e),
+        )
+    assert fn.await_count == 1
