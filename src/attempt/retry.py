@@ -1,7 +1,7 @@
 """
 Üretim kalitesinde retry / attempt yardımcıları.
 
-- Exponential backoff + opsiyonel jitter
+- Exponential backoff + opsiyonel jitter (equal veya AWS full jitter)
 - Maksimum deneme sayısı ve toplam zaman aşımı
 - Belirli exception türlerini filtreleme
 - Opsiyonel retry_if predicate ile ince taneli exception kontrolü
@@ -16,12 +16,13 @@ import asyncio
 import functools
 import random
 import time
-from typing import Any, Awaitable, Callable, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Awaitable, Callable, Literal, Optional, Tuple, Type, TypeVar, Union
 
 T = TypeVar("T")
 ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException], ...]]
 RetryPredicate = Callable[[BaseException], bool]
 ResultPredicate = Callable[[Any], bool]
+JitterMode = Union[bool, Literal["full", "equal"]]
 
 
 class RetryError(Exception):
@@ -60,14 +61,27 @@ def _compute_delay(
     base_delay: float,
     max_delay: float,
     exponential_base: float,
-    jitter: bool,
+    jitter: JitterMode,
 ) -> float:
-    """Verilen deneme numarası için bekleme süresini hesapla."""
+    """Verilen deneme numarası için bekleme süresini hesapla.
+
+    jitter:
+      - False / None: jitter yok, saf exponential
+      - True / "equal": ±%25 equal jitter (varsayılan, geriye uyumlu)
+      - "full": AWS full jitter — [0, delay] aralığından uniform seçim
+        (dağıtık sistemlerde thundering herd için önerilen strateji)
+    """
     delay = min(base_delay * (exponential_base ** (attempt_number - 1)), max_delay)
-    if jitter and delay > 0:
-        # ±%25 jitter
-        delay = delay * (0.75 + random.random() * 0.5)
-    return max(0.0, delay)
+    if delay <= 0:
+        return 0.0
+
+    if jitter is False:
+        return delay
+    if jitter == "full":
+        # AWS Architecture Blog: full jitter
+        return random.uniform(0.0, delay)
+    # True veya "equal" → ±%25 equal jitter
+    return delay * (0.75 + random.random() * 0.5)
 
 
 def _should_retry(exc: BaseException, retry_if: Optional[RetryPredicate]) -> bool:
@@ -91,7 +105,7 @@ def attempt(
     base_delay: float = 1.0,
     max_delay: float = 60.0,
     exponential_base: float = 2.0,
-    jitter: bool = True,
+    jitter: JitterMode = True,
     exceptions: ExceptionType = (Exception,),
     retry_if: Optional[RetryPredicate] = None,
     retry_if_result: Optional[ResultPredicate] = None,
@@ -108,7 +122,10 @@ def attempt(
         base_delay: İlk bekleme süresi (saniye).
         max_delay: Üst sınır bekleme süresi (saniye).
         exponential_base: Üstel çarpan (genelde 2.0).
-        jitter: True ise rastgele ±%25 jitter eklenir.
+        jitter: Jitter stratejisi.
+            - True / "equal": ±%25 equal jitter (varsayılan).
+            - "full": AWS full jitter — [0, delay] uniform (thundering herd için ideal).
+            - False: jitter yok.
         exceptions: Yakalanacak exception sınıf(lar)ı.
         retry_if: Opsiyonel predicate. Yakalanan exception için
                   True dönerse yeniden dene, False dönerse hemen yükselt.
@@ -212,7 +229,7 @@ def retry(
     base_delay: float = 1.0,
     max_delay: float = 60.0,
     exponential_base: float = 2.0,
-    jitter: bool = True,
+    jitter: JitterMode = True,
     exceptions: ExceptionType = (Exception,),
     retry_if: Optional[RetryPredicate] = None,
     retry_if_result: Optional[ResultPredicate] = None,
@@ -230,6 +247,10 @@ def retry(
 
         @retry(retry_if_result=lambda r: r is None or len(r) == 0)
         def get_items() -> list:
+            ...
+
+        @retry(jitter="full", max_attempts=5)  # AWS full jitter
+        def call_api():
             ...
     """
 
@@ -263,7 +284,7 @@ async def async_attempt(
     base_delay: float = 1.0,
     max_delay: float = 60.0,
     exponential_base: float = 2.0,
-    jitter: bool = True,
+    jitter: JitterMode = True,
     exceptions: ExceptionType = (Exception,),
     retry_if: Optional[RetryPredicate] = None,
     retry_if_result: Optional[ResultPredicate] = None,
@@ -277,6 +298,7 @@ async def async_attempt(
     Args:
         func: Çağrılacak async callable (argümansız veya lambda).
         Diğer parametreler `attempt` ile aynıdır; bekleme `asyncio.sleep` kullanır.
+        jitter="full" desteklenir.
         retry_if_result desteklenir.
 
     Returns:
@@ -361,7 +383,7 @@ def async_retry(
     base_delay: float = 1.0,
     max_delay: float = 60.0,
     exponential_base: float = 2.0,
-    jitter: bool = True,
+    jitter: JitterMode = True,
     exceptions: ExceptionType = (Exception,),
     retry_if: Optional[RetryPredicate] = None,
     retry_if_result: Optional[ResultPredicate] = None,
@@ -379,6 +401,10 @@ def async_retry(
 
         @async_retry(retry_if_result=lambda r: not r.get("ok"))
         async def call_api() -> dict:
+            ...
+
+        @async_retry(jitter="full")
+        async def distributed_call():
             ...
     """
 

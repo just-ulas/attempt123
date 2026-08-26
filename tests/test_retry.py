@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from attempt import RetryError, async_attempt, async_retry, attempt, retry
+from attempt.retry import _compute_delay
 
 
 def test_successful_first_try():
@@ -279,6 +280,65 @@ def test_retry_if_result_with_decorator():
     assert len(calls) == 2
 
 
+def test_full_jitter_stays_within_bounds():
+    """jitter='full' ile gecikme [0, computed_delay] aralığında olmalı."""
+    # attempt 1 → base=1.0 → max possible = 1.0
+    # attempt 2 → 2.0, attempt 3 → 4.0
+    for attempt_num, expected_cap in [(1, 1.0), (2, 2.0), (3, 4.0)]:
+        samples = [
+            _compute_delay(attempt_num, 1.0, 60.0, 2.0, "full")
+            for _ in range(50)
+        ]
+        assert all(0.0 <= d <= expected_cap + 1e-9 for d in samples)
+        # En az bir örnek cap'e yakın olmalı (istatistiksel olarak çok olası)
+        assert max(samples) > expected_cap * 0.1
+
+
+def test_full_jitter_via_attempt_api():
+    """attempt(..., jitter='full') on_retry üzerinden geçerli delay üretmeli."""
+    delays = []
+
+    def on_retry(attempt_num, exc, delay):
+        delays.append(delay)
+
+    fn = Mock(side_effect=[Exception()] * 3)
+    with pytest.raises(Exception):
+        attempt(
+            fn,
+            max_attempts=3,
+            base_delay=0.2,
+            max_delay=10.0,
+            exponential_base=2.0,
+            jitter="full",
+            on_retry=on_retry,
+        )
+
+    assert len(delays) == 2
+    # attempt 1 → [0, 0.2], attempt 2 → [0, 0.4]
+    assert 0.0 <= delays[0] <= 0.2 + 1e-9
+    assert 0.0 <= delays[1] <= 0.4 + 1e-9
+
+
+def test_equal_jitter_alias():
+    """jitter='equal' True ile aynı davranışı göstermeli (aralık kontrolü)."""
+    samples_true = [
+        _compute_delay(1, 1.0, 60.0, 2.0, True) for _ in range(30)
+    ]
+    samples_equal = [
+        _compute_delay(1, 1.0, 60.0, 2.0, "equal") for _ in range(30)
+    ]
+    # Equal jitter: delay * [0.75, 1.25] → [0.75, 1.25]
+    assert all(0.75 <= d <= 1.25 + 1e-9 for d in samples_true)
+    assert all(0.75 <= d <= 1.25 + 1e-9 for d in samples_equal)
+
+
+def test_no_jitter():
+    """jitter=False iken delay tam olarak exponential olmalı."""
+    assert _compute_delay(1, 1.0, 60.0, 2.0, False) == 1.0
+    assert _compute_delay(2, 1.0, 60.0, 2.0, False) == 2.0
+    assert _compute_delay(3, 1.0, 60.0, 2.0, False) == 4.0
+
+
 @pytest.mark.asyncio
 async def test_async_successful_first_try():
     """Async: ilk denemede başarılı."""
@@ -366,3 +426,24 @@ async def test_async_retry_if_result():
     )
     assert result == {"ok": True, "data": 1}
     assert fn.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_async_full_jitter():
+    """Async path'te de jitter='full' çalışmalı."""
+    delays = []
+
+    def on_retry(attempt_num, exc, delay):
+        delays.append(delay)
+
+    fn = AsyncMock(side_effect=[RuntimeError("x"), RuntimeError("y"), "ok"])
+    result = await async_attempt(
+        fn,
+        max_attempts=5,
+        base_delay=0.05,
+        jitter="full",
+        on_retry=on_retry,
+    )
+    assert result == "ok"
+    assert len(delays) == 2
+    assert all(0.0 <= d for d in delays)

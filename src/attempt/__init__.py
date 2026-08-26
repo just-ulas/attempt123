@@ -20,6 +20,11 @@ Kullanım:
         lambda: fetch_list(),
         retry_if_result=lambda r: r is None or len(r) == 0,
     )
+
+    # AWS full jitter (dağıtık sistemler için):
+    @retry(jitter="full", max_attempts=5)
+    def call_remote():
+        ...
 """
 
 from .retry import RetryError, async_attempt, async_retry, attempt, retry
@@ -31,4 +36,4 @@ __all__ = [
     "async_attempt",
     "RetryError",
 ]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

@@ -6,7 +6,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 
 ## Özellikler
 
-- **Exponential backoff** + jitter (thundering herd’ü önler)
+- **Exponential backoff** + jitter (equal ±%25 veya **AWS full jitter**)
 - Maksimum deneme sayısı ve toplam zaman aşımı kontrolü
 - Belirli exception türlerini yakalama / yok sayma
 - **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı (ör. sadece HTTP 429/503)
@@ -49,6 +49,32 @@ result = attempt(
     exceptions=(requests.RequestException,),
 )
 ```
+
+### Jitter stratejileri
+
+Varsayılan `jitter=True` (veya `"equal"`) ±%25 equal jitter uygular. Dağıtık sistemlerde thundering herd’ü daha iyi önlemek için AWS’in önerdiği **full jitter** kullanılabilir:
+
+```python
+from attempt import retry, attempt
+
+# Full jitter: bekleme süresi [0, computed_delay] aralığından seçilir
+@retry(jitter="full", max_attempts=6, base_delay=0.5, max_delay=30.0)
+def call_many_clients():
+    ...
+
+result = attempt(
+    lambda: remote_call(),
+    max_attempts=5,
+    base_delay=1.0,
+    jitter="full",  # AWS Architecture Blog önerisi
+)
+```
+
+| `jitter` değeri | Davranış |
+|-----------------|----------|
+| `True` / `"equal"` | ±%25 equal jitter (varsayılan, geriye uyumlu) |
+| `"full"` | `[0, delay]` uniform — full jitter |
+| `False` | Jitter yok, saf exponential |
 
 ### İnce taneli kontrol: `retry_if`
 
@@ -121,7 +147,7 @@ Denemeler tükendiğinde `RetryError` ( `reraise_as_retry_error=True` ise) veya 
 ```python
 from attempt import async_retry, async_attempt
 
-@async_retry(max_attempts=5, base_delay=0.5, exceptions=(ConnectionError,))
+@async_retry(max_attempts=5, base_delay=0.5, exceptions=(ConnectionError,), jitter="full")
 async def fetch_async(url: str) -> dict:
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -162,7 +188,7 @@ except RetryError as e:
 | `base_delay`              | `1.0`          | İlk bekleme süresi (saniye)                   |
 | `max_delay`               | `60.0`         | Üst sınır bekleme süresi                      |
 | `exponential_base`        | `2.0`          | Üstel çarpan                                  |
-| `jitter`                  | `True`         | Rastgele ±%25 jitter ekle                     |
+| `jitter`                  | `True`         | `True`/`"equal"` (±%25), `"full"` (AWS), `False` |
 | `exceptions`              | `(Exception,)` | Yakalanacak exception sınıfları               |
 | `retry_if`                | `None`         | `exc -> bool`; False ise hemen yükselt        |
 | `retry_if_result`         | `None`         | `result -> bool`; True ise sonucu reddet ve yeniden dene |
