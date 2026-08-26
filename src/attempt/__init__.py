@@ -14,6 +14,12 @@ Kullanım:
 
     result = attempt(lambda: do_something(), max_attempts=3)
     result = await async_attempt(lambda: do_something_async(), max_attempts=3)
+
+    # Sonuç tabanlı yeniden deneme:
+    result = attempt(
+        lambda: fetch_list(),
+        retry_if_result=lambda r: r is None or len(r) == 0,
+    )
 """
 
 from .retry import RetryError, async_attempt, async_retry, attempt, retry
@@ -25,4 +31,4 @@ __all__ = [
     "async_attempt",
     "RetryError",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

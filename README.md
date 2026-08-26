@@ -10,9 +10,10 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - Maksimum deneme sayısı ve toplam zaman aşımı kontrolü
 - Belirli exception türlerini yakalama / yok sayma
 - **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı (ör. sadece HTTP 429/503)
+- **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme (ör. boş liste, gövdede hata alanı)
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
-- **RetryError**: son exception + deneme sayısını birlikte taşıyan sarmalayıcı
+- **RetryError**: son exception / reddedilen sonuç + deneme sayısını birlikte taşıyan sarmalayıcı
 - Tamamen standart kütüphane — ekstra bağımlılık yok
 - Tip ipuçları ve kapsamlı docstring’ler
 
@@ -82,6 +83,39 @@ def fetch():
     ...
 ```
 
+### Sonuç tabanlı yeniden deneme: `retry_if_result`
+
+Exception fırlatmayan ama “başarısız” sayılan dönüş değerlerinde (boş liste, hata alanı olan JSON vb.) yeniden denemek için:
+
+```python
+from attempt import attempt
+
+# Boş liste gelirse tekrar dene
+items = attempt(
+    lambda: fetch_items_from_api(),
+    max_attempts=4,
+    base_delay=0.5,
+    retry_if_result=lambda r: r is None or len(r) == 0,
+)
+
+# API 200 dönse bile gövdede error varsa tekrar dene
+payload = attempt(
+    lambda: client.get("/resource").json(),
+    max_attempts=5,
+    retry_if_result=lambda body: body.get("error") is not None,
+)
+```
+
+Decorator ile:
+
+```python
+@retry(retry_if_result=lambda r: not r.get("ok", False), max_attempts=3)
+def call_service() -> dict:
+    ...
+```
+
+Denemeler tükendiğinde `RetryError` ( `reraise_as_retry_error=True` ise) veya açıklayıcı bir `RuntimeError` yükseltilir; `RetryError.last_result` reddedilen son değeri taşır.
+
 ### Async kullanım
 
 ```python
@@ -99,6 +133,12 @@ result = await async_attempt(
     max_attempts=3,
     base_delay=1.0,
 )
+
+# async + sonuç predicate
+result = await async_attempt(
+    lambda: fetch_async_list(),
+    retry_if_result=lambda r: len(r) == 0,
+)
 ```
 
 ### RetryError ile daha anlamlı hata mesajı
@@ -110,7 +150,8 @@ try:
     attempt(fragile_fn, max_attempts=3, reraise_as_retry_error=True)
 except RetryError as e:
     print(e.attempts)          # 3
-    print(e.last_exception)    # orijinal exception
+    print(e.last_exception)    # orijinal exception (veya None)
+    print(e.last_result)       # reddedilen sonuç (varsa)
 ```
 
 ## API Özeti
@@ -124,13 +165,14 @@ except RetryError as e:
 | `jitter`                  | `True`         | Rastgele ±%25 jitter ekle                     |
 | `exceptions`              | `(Exception,)` | Yakalanacak exception sınıfları               |
 | `retry_if`                | `None`         | `exc -> bool`; False ise hemen yükselt        |
+| `retry_if_result`         | `None`         | `result -> bool`; True ise sonucu reddet ve yeniden dene |
 | `on_retry`                | `None`         | Her yeniden denemede çağrılacak callback      |
 | `timeout`                 | `None`         | Toplam maksimum çalışma süresi (saniye)       |
 | `reraise_as_retry_error`  | `False`        | Başarısızlıkta `RetryError` yükselt           |
 
 **Sync API:** `attempt()`, `@retry`  
 **Async API:** `async_attempt()`, `@async_retry`  
-**Hata sınıfı:** `RetryError` (`last_exception`, `attempts`)
+**Hata sınıfı:** `RetryError` (`last_exception`, `attempts`, `last_result`)
 
 ## Testler
 

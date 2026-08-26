@@ -61,7 +61,7 @@ def test_on_retry_callback():
     events = []
 
     def on_retry(attempt_num, exc, delay):
-        events.append((attempt_num, type(exc).__name__, delay))
+        events.append((attempt_num, type(exc).__name__ if exc else None, delay))
 
     fn = Mock(side_effect=[ValueError("a"), ValueError("b"), "done"])
     result = attempt(
@@ -205,6 +205,80 @@ def test_retry_if_with_decorator():
     assert len(calls) == 3
 
 
+def test_retry_if_result_retries_until_acceptable():
+    """retry_if_result True dönerse sonucu reddedip yeniden denemeli."""
+    fn = Mock(side_effect=[[], [], ["item"]])
+    result = attempt(
+        fn,
+        max_attempts=5,
+        base_delay=0.01,
+        jitter=False,
+        retry_if_result=lambda r: r is None or len(r) == 0,
+    )
+    assert result == ["item"]
+    assert fn.call_count == 3
+
+
+def test_retry_if_result_exhausted_raises():
+    """Sonuç hiç kabul edilmezse RuntimeError / RetryError yükseltilmeli."""
+    fn = Mock(return_value=[])
+    with pytest.raises(RuntimeError, match="kabul edilmedi"):
+        attempt(
+            fn,
+            max_attempts=3,
+            base_delay=0.01,
+            jitter=False,
+            retry_if_result=lambda r: len(r) == 0,
+        )
+    assert fn.call_count == 3
+
+    fn2 = Mock(return_value={"error": "busy"})
+    with pytest.raises(RetryError) as ei:
+        attempt(
+            fn2,
+            max_attempts=2,
+            base_delay=0.01,
+            jitter=False,
+            retry_if_result=lambda r: r.get("error") is not None,
+            reraise_as_retry_error=True,
+        )
+    assert ei.value.attempts == 2
+    assert ei.value.last_exception is None
+    assert ei.value.last_result == {"error": "busy"}
+
+
+def test_retry_if_result_accepts_first_good():
+    """İlk sonuç kabul edilirse hiç yeniden denememeli."""
+    fn = Mock(return_value=[1, 2, 3])
+    result = attempt(
+        fn,
+        max_attempts=5,
+        retry_if_result=lambda r: len(r) == 0,
+    )
+    assert result == [1, 2, 3]
+    assert fn.call_count == 1
+
+
+def test_retry_if_result_with_decorator():
+    """@retry üzerinde retry_if_result çalışmalı."""
+    calls = []
+
+    @retry(
+        max_attempts=4,
+        base_delay=0.01,
+        jitter=False,
+        retry_if_result=lambda r: r is None,
+    )
+    def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            return None
+        return "ok"
+
+    assert flaky() == "ok"
+    assert len(calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_async_successful_first_try():
     """Async: ilk denemede başarılı."""
@@ -277,3 +351,18 @@ async def test_async_retry_if():
             retry_if=lambda e: "geçici" in str(e),
         )
     assert fn.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_retry_if_result():
+    """Async: retry_if_result ile sonuç reddedilip yeniden denenmeli."""
+    fn = AsyncMock(side_effect=[{"ok": False}, {"ok": False}, {"ok": True, "data": 1}])
+    result = await async_attempt(
+        fn,
+        max_attempts=5,
+        base_delay=0.01,
+        jitter=False,
+        retry_if_result=lambda r: not r.get("ok"),
+    )
+    assert result == {"ok": True, "data": 1}
+    assert fn.await_count == 3
