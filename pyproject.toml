@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "attempt123"
-version = "0.1.0"
-description = "Basit, bağımlılıksız ve üretim kalitesinde retry / attempt yardımcı kütüphanesi"
+version = "0.2.0"
+description = "Basit, bağımlılıksız ve üretim kalitesinde retry / attempt yardımcı kütüphanesi (sync + async)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "just-ulas"}
 ]
-keywords = ["retry", "backoff", "resilience", "attempt"]
+keywords = ["retry", "backoff", "resilience", "attempt", "async"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -24,13 +24,15 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+test = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"

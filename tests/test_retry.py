@@ -1,11 +1,12 @@
 """attempt.retry birim testleri."""
 
+import asyncio
 import time
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from attempt import attempt, retry
+from attempt import RetryError, async_attempt, async_retry, attempt, retry
 
 
 def test_successful_first_try():
@@ -124,3 +125,80 @@ def test_timeout_stops_early():
     # 10 deneme yapmaya çalışmaz; timeout nedeniyle erken kesilir
     assert elapsed < 1.0
     assert fn.call_count < 10
+
+
+def test_reraise_as_retry_error():
+    """reraise_as_retry_error=True iken RetryError yükseltilmeli."""
+    fn = Mock(side_effect=ValueError("kalıcı hata"))
+    with pytest.raises(RetryError) as exc_info:
+        attempt(
+            fn,
+            max_attempts=3,
+            base_delay=0.01,
+            jitter=False,
+            reraise_as_retry_error=True,
+        )
+    err = exc_info.value
+    assert err.attempts == 3
+    assert isinstance(err.last_exception, ValueError)
+    assert "kalıcı hata" in str(err.last_exception)
+    assert fn.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_async_successful_first_try():
+    """Async: ilk denemede başarılı."""
+    fn = AsyncMock(return_value=99)
+    result = await async_attempt(fn, max_attempts=3)
+    assert result == 99
+    assert fn.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_retry_until_success():
+    """Async: birkaç başarısız denemeden sonra başarı."""
+    fn = AsyncMock(side_effect=[ConnectionError("x"), ConnectionError("y"), "ok"])
+    result = await async_attempt(fn, max_attempts=5, base_delay=0.01, jitter=False)
+    assert result == "ok"
+    assert fn.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_async_exhausted_raises():
+    """Async: denemeler tükenince exception yükseltilmeli."""
+    fn = AsyncMock(side_effect=RuntimeError("fail"))
+    with pytest.raises(RuntimeError, match="fail"):
+        await async_attempt(fn, max_attempts=2, base_delay=0.01, jitter=False)
+    assert fn.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_async_decorator_works():
+    """@async_retry decorator doğru çalışmalı."""
+    calls = []
+
+    @async_retry(max_attempts=3, base_delay=0.01, jitter=False)
+    async def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            raise TimeoutError("geçici")
+        return "async-success"
+
+    assert await flaky() == "async-success"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_reraise_as_retry_error():
+    """Async + RetryError sarmalama."""
+    fn = AsyncMock(side_effect=OSError("disk"))
+    with pytest.raises(RetryError) as exc_info:
+        await async_attempt(
+            fn,
+            max_attempts=2,
+            base_delay=0.01,
+            jitter=False,
+            reraise_as_retry_error=True,
+        )
+    assert exc_info.value.attempts == 2
+    assert isinstance(exc_info.value.last_exception, OSError)
