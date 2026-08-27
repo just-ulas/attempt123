@@ -6,7 +6,7 @@
 - Belirli exception türlerini filtreleme
 - Opsiyonel retry_if predicate ile ince taneli exception kontrolü
 - Opsiyonel retry_if_result predicate ile sonuç tabanlı yeniden deneme
-- HTTP Retry-After / exception.retry_after ipucunu onurlandırma
+- HTTP Retry-After (saniye veya RFC 7231 HTTP-date) / exception.retry_after
 - Decorator ve fonksiyon arayüzü (sync + async)
 - RetryError: son exception + deneme sayısı + deneme geçmişi
 """
@@ -17,6 +17,8 @@ import asyncio
 import functools
 import random
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable, List, Literal, Optional, Tuple, Type, TypeVar, Union
 
 T = TypeVar("T")
@@ -87,14 +89,38 @@ class RetryError(Exception):
         super().__init__(message)
 
 
+def _parse_http_date_delay(value: Any) -> Optional[float]:
+    """RFC 7231 HTTP-date → şimdiden itibaren saniye. Parse edilemezse None."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = (dt - datetime.now(timezone.utc)).total_seconds()
+    if delta != delta:
+        return None
+    return max(0.0, delta)
+
+
 def extract_retry_after(exc: BaseException) -> Optional[float]:
     """Exception üzerinden sunucunun önerdiği bekleme süresini (saniye) çıkar.
 
     Sıra:
-      1. ``exc.retry_after`` (sayı veya sayıya çevrilebilir string)
-      2. ``exc.headers['Retry-After']`` / ``retry-after`` (HTTP-date değil, saniye)
+      1. ``exc.retry_after`` (sayı, sayıya çevrilebilir string veya HTTP-date)
+      2. ``exc.headers['Retry-After']`` / ``retry-after``
+         - delay-seconds (``Retry-After: 120``)
+         - RFC 7231 HTTP-date (``Retry-After: Wed, 21 Oct 2015 07:28:00 GMT``)
 
     Parse edilemezse None döner; o durumda normal backoff kullanılır.
+    Geçmiş bir HTTP-date 0 saniye olarak yorumlanır.
     """
     value: Any = getattr(exc, "retry_after", None)
     if value is None:
@@ -112,7 +138,9 @@ def extract_retry_after(exc: BaseException) -> Optional[float]:
     try:
         seconds = float(value)
     except (TypeError, ValueError):
-        return None
+        seconds = _parse_http_date_delay(value)
+        if seconds is None:
+            return None
     if seconds != seconds:
         return None
     return max(0.0, seconds)

@@ -12,7 +12,9 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı
 - **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme
 - **`retry_after`**: sunucunun önerdiği bekleme süresini onurlandırır (`Retry-After` / `exc.retry_after`)
+- **HTTP-date `Retry-After`**: RFC 7231 tarih değerleri saniyeye çevrilir (`Wed, 21 Oct 2015 07:28:00 GMT`)
 - Hazır predicate'ler: `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
+- Predicate birleştirme: **`any_of` / `all_of` / `not_`**
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
@@ -42,15 +44,25 @@ result = attempt(
 )
 ```
 
-### Hazır predicate'ler
+### Hazır predicate'ler ve birleştirme
 
 ```python
 from attempt import attempt, retry_if_status, retry_if_message, retry_if_empty
+from attempt import any_of, not_
 
 result = attempt(
     lambda: call_api(),
     max_attempts=5,
-    retry_if=retry_if_status(429, 502, 503, 504),
+    retry_if=any_of(
+        retry_if_status(429, 502, 503, 504),
+        retry_if_message("timeout", "temporarily unavailable"),
+    ),
+)
+
+# 4xx istemci hatalarında vazgeç, diğerlerinde dene
+result = attempt(
+    lambda: call_api(),
+    retry_if=not_(retry_if_status(400, 401, 403, 404)),
 )
 
 items = attempt(
@@ -59,7 +71,7 @@ items = attempt(
 )
 ```
 
-### HTTP Retry-After
+### HTTP Retry-After (saniye veya HTTP-date)
 
 ```python
 from attempt import attempt, extract_retry_after, retry_if_status
@@ -74,7 +86,12 @@ result = attempt(
 )
 ```
 
-`extract_retry_after` sırasıyla `exc.retry_after` ve `exc.headers["Retry-After"]` değerlerine bakar. Parse edilemezse normal exponential backoff kullanılır. Önerilen süre `max_delay` ile sınırlanır.
+`extract_retry_after` sırasıyla `exc.retry_after` ve `exc.headers["Retry-After"]` değerlerine bakar.
+
+- `Retry-After: 120` → 120 saniye
+- `Retry-After: Wed, 21 Oct 2015 07:28:00 GMT` → tarihe kalan saniye (geçmişse 0)
+
+Parse edilemezse normal exponential backoff kullanılır. Önerilen süre `max_delay` ile sınırlanır.
 
 ### RetryError geçmişi
 
@@ -116,7 +133,7 @@ async def fetch_async(url: str) -> dict:
 | `timeout` | `None` | Toplam süre sınırı |
 | `reraise_as_retry_error` | `False` | `RetryError` yükselt |
 
-**Yardımcılar:** `extract_retry_after`, `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
+**Yardımcılar:** `extract_retry_after`, `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`, `any_of`, `all_of`, `not_`, `always`
 
 ## Testler
 

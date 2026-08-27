@@ -4,6 +4,7 @@ attempt123 – basit, bağımlılıksız retry / attempt yardımcı kütüphanes
 Kullanım:
     from attempt import retry, attempt, async_retry, async_attempt, RetryError
     from attempt import extract_retry_after, retry_if_status, retry_if_empty
+    from attempt import any_of, all_of, not_
 
     @retry(max_attempts=5, retry_after=extract_retry_after)
     def fragile():
@@ -11,12 +12,22 @@ Kullanım:
 
     result = attempt(
         lambda: fetch_list(),
+        retry_if=any_of(retry_if_status(429, 503), retry_if_message("timeout")),
         retry_if_result=retry_if_empty,
         reraise_as_retry_error=True,
     )
 """
 
-from .predicates import retry_if_empty, retry_if_falsy, retry_if_message, retry_if_status
+from .predicates import (
+    all_of,
+    always,
+    any_of,
+    not_,
+    retry_if_empty,
+    retry_if_falsy,
+    retry_if_message,
+    retry_if_status,
+)
 from .retry import (
     RetryAttempt,
     RetryError,
@@ -39,5 +50,9 @@ __all__ = [
     "retry_if_message",
     "retry_if_empty",
     "retry_if_falsy",
+    "always",
+    "any_of",
+    "all_of",
+    "not_",
 ]
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -61,12 +61,56 @@ def always(*_args: Any, **_kwargs: Any) -> bool:
     return True
 
 
+def any_of(*preds: RetryPredicate) -> RetryPredicate:
+    """Predicate'lerden herhangi biri True ise True (OR).
+
+    Örnek::
+
+        retry_if=any_of(retry_if_status(429, 503), retry_if_message("timeout"))
+    """
+    if not preds:
+        raise ValueError("any_of en az bir predicate ister")
+
+    def _pred(exc: BaseException) -> bool:
+        return any(bool(p(exc)) for p in preds)
+
+    return _pred
+
+
+def all_of(*preds: RetryPredicate) -> RetryPredicate:
+    """Tüm predicate'ler True ise True (AND)."""
+    if not preds:
+        raise ValueError("all_of en az bir predicate ister")
+
+    def _pred(exc: BaseException) -> bool:
+        return all(bool(p(exc)) for p in preds)
+
+    return _pred
+
+
+def not_(pred: RetryPredicate) -> RetryPredicate:
+    """Predicate sonucunu tersine çevir.
+
+    Örnek::
+
+        retry_if=not_(retry_if_status(400, 401, 403, 404))
+    """
+
+    def _pred(exc: BaseException) -> bool:
+        return not bool(pred(exc))
+
+    return _pred
+
+
 __all__ = [
     "retry_if_status",
     "retry_if_message",
     "retry_if_empty",
     "retry_if_falsy",
     "always",
+    "any_of",
+    "all_of",
+    "not_",
     "RetryPredicate",
     "ResultPredicate",
 ]

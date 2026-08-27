@@ -1,5 +1,7 @@
 """Retry-After, deneme geçmişi, parametre doğrulama ve hazır predicate testleri."""
 
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -7,9 +9,12 @@ import pytest
 from attempt import (
     RetryAttempt,
     RetryError,
+    all_of,
+    any_of,
     async_attempt,
     attempt,
     extract_retry_after,
+    not_,
     retry_if_empty,
     retry_if_message,
     retry_if_status,
@@ -37,6 +42,50 @@ def test_extract_retry_after_attr_and_headers():
     assert extract_retry_after(RateLimit(headers={"retry-after": "1.5"})) == 1.5
     assert extract_retry_after(RateLimit(retry_after="not-a-number")) is None
     assert extract_retry_after(ValueError("x")) is None
+
+
+def test_extract_retry_after_http_date():
+    class RateLimit(Exception):
+        def __init__(self, headers):
+            super().__init__("429")
+            self.headers = headers
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=8)
+    header = format_datetime(future, usegmt=True)
+    delay = extract_retry_after(RateLimit({"Retry-After": header}))
+    assert delay is not None
+    assert 6.0 <= delay <= 8.5
+
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    past_header = format_datetime(past, usegmt=True)
+    assert extract_retry_after(RateLimit({"Retry-After": past_header})) == 0.0
+
+
+def test_retry_after_http_date_overrides_backoff():
+    delays = []
+    future = datetime.now(timezone.utc) + timedelta(seconds=0.05)
+
+    class RateLimit(Exception):
+        def __init__(self):
+            super().__init__("429")
+            self.headers = {"Retry-After": format_datetime(future, usegmt=True)}
+
+    def on_retry(attempt_num, exc, delay):
+        delays.append(delay)
+
+    fn = Mock(side_effect=[RateLimit(), "ok"])
+    result = attempt(
+        fn,
+        max_attempts=3,
+        base_delay=10.0,
+        max_delay=60.0,
+        jitter=False,
+        retry_after=extract_retry_after,
+        on_retry=on_retry,
+    )
+    assert result == "ok"
+    assert len(delays) == 1
+    assert 0.0 <= delays[0] <= 0.2
 
 
 def test_retry_after_overrides_backoff():
@@ -135,6 +184,49 @@ def test_retry_if_status_helper():
             retry_if=retry_if_status(429, 503),
         )
     assert fn2.call_count == 1
+
+
+def test_any_of_combines_predicates():
+    class HttpError(Exception):
+        def __init__(self, status_code: int, msg: str = ""):
+            self.status_code = status_code
+            super().__init__(msg or f"HTTP {status_code}")
+
+    pred = any_of(retry_if_status(429, 503), retry_if_message("timeout"))
+    fn = Mock(side_effect=[HttpError(503), HttpError(400, "gateway timeout"), "ok"])
+    result = attempt(fn, max_attempts=4, base_delay=0.01, jitter=False, retry_if=pred)
+    assert result == "ok"
+    assert fn.call_count == 3
+
+    fn2 = Mock(side_effect=HttpError(400, "bad request"))
+    with pytest.raises(HttpError):
+        attempt(fn2, max_attempts=4, base_delay=0.01, jitter=False, retry_if=pred)
+    assert fn2.call_count == 1
+
+
+def test_all_of_and_not_predicates():
+    class HttpError(Exception):
+        def __init__(self, status_code: int, msg: str = ""):
+            self.status_code = status_code
+            super().__init__(msg or f"HTTP {status_code}")
+
+    both = all_of(retry_if_status(429), retry_if_message("slow down"))
+    assert both(HttpError(429, "please slow down")) is True
+    assert both(HttpError(429, "too many")) is False
+    assert both(HttpError(503, "slow down")) is False
+
+    give_up_client = not_(retry_if_status(400, 401, 404))
+    fn = Mock(side_effect=[HttpError(404, "missing")])
+    with pytest.raises(HttpError):
+        attempt(fn, max_attempts=5, base_delay=0.01, jitter=False, retry_if=give_up_client)
+    assert fn.call_count == 1
+
+
+def test_compose_helpers_require_predicates():
+    with pytest.raises(ValueError):
+        any_of()
+    with pytest.raises(ValueError):
+        all_of()
 
 
 def test_retry_if_empty_helper():
