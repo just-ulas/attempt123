@@ -17,6 +17,7 @@ from attempt import (
     not_,
     retry_if_empty,
     retry_if_message,
+    retry_if_result_status,
     retry_if_status,
 )
 
@@ -42,6 +43,7 @@ def test_extract_retry_after_attr_and_headers():
     assert extract_retry_after(RateLimit(headers={"retry-after": "1.5"})) == 1.5
     assert extract_retry_after(RateLimit(retry_after="not-a-number")) is None
     assert extract_retry_after(ValueError("x")) is None
+    assert extract_retry_after(None) is None
 
 
 def test_extract_retry_after_http_date():
@@ -135,6 +137,73 @@ def test_retry_after_capped_by_max_delay():
     )
     assert result == "ok"
     assert delays[0] == pytest.approx(0.02)
+
+
+def test_retry_after_on_rejected_result():
+    """Exception yokken reddedilen Response'taki Retry-After backoff'u ezer."""
+
+    class Response:
+        def __init__(self, status_code, retry_after=None):
+            self.status_code = status_code
+            self.headers = {"Retry-After": str(retry_after)} if retry_after is not None else {}
+
+    delays = []
+
+    def on_retry(attempt_num, exc, delay):
+        delays.append((exc, delay))
+
+    limited = Response(429, retry_after=0.04)
+    ok = Response(200)
+    fn = Mock(side_effect=[limited, ok])
+    result = attempt(
+        fn,
+        max_attempts=4,
+        base_delay=10.0,
+        max_delay=60.0,
+        jitter=False,
+        retry_if_result=retry_if_result_status(429, 503),
+        retry_after=extract_retry_after,
+        on_retry=on_retry,
+    )
+    assert result is ok
+    assert fn.call_count == 2
+    assert delays[0][0] is None
+    assert delays[0][1] == pytest.approx(0.04)
+
+
+def test_retry_if_result_status_skips_ok_and_client_errors():
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    fn = Mock(return_value=Response(200))
+    result = attempt(
+        fn,
+        max_attempts=5,
+        retry_if_result=retry_if_result_status(429, 503),
+    )
+    assert result.status_code == 200
+    assert fn.call_count == 1
+
+    fn2 = Mock(return_value=Response(404))
+    result2 = attempt(
+        fn2,
+        max_attempts=5,
+        retry_if_result=retry_if_result_status(429, 503),
+    )
+    assert result2.status_code == 404
+    assert fn2.call_count == 1
+
+
+def test_retry_if_result_status_reads_status_alias():
+    class AiohttpLike:
+        def __init__(self, status):
+            self.status = status
+
+    pred = retry_if_result_status(429, 503)
+    assert pred(AiohttpLike(429)) is True
+    assert pred(AiohttpLike(200)) is False
+    assert pred(object()) is False
 
 
 def test_retry_error_includes_history():
@@ -274,3 +343,30 @@ async def test_async_retry_after_and_history():
     assert err.attempts == 2
     assert len(err.history) == 2
     assert err.history[0].delay == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_async_retry_after_on_rejected_result():
+    class Response:
+        def __init__(self, status_code, retry_after=None):
+            self.status_code = status_code
+            self.headers = {"Retry-After": str(retry_after)} if retry_after is not None else {}
+
+    delays = []
+
+    def on_retry(attempt_num, exc, delay):
+        delays.append(delay)
+
+    fn = AsyncMock(side_effect=[Response(503, retry_after=0.02), Response(200)])
+    result = await async_attempt(
+        fn,
+        max_attempts=4,
+        base_delay=8.0,
+        max_delay=30.0,
+        jitter=False,
+        retry_if_result=retry_if_result_status(429, 503),
+        retry_after=extract_retry_after,
+        on_retry=on_retry,
+    )
+    assert result.status_code == 200
+    assert delays == [pytest.approx(0.02)]

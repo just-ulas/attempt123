@@ -25,6 +25,28 @@ def retry_if_status(*codes: int) -> RetryPredicate:
     return _pred
 
 
+def retry_if_result_status(*codes: int) -> ResultPredicate:
+    """Dönen nesnenin ``status_code`` / ``status`` alanı verilen kodlardansa True.
+
+    Exception yükseltmeyen HTTP istemcileri için (requests, httpx Response)::
+
+        attempt(
+            lambda: session.get(url),
+            retry_if_result=retry_if_result_status(429, 502, 503, 504),
+            retry_after=extract_retry_after,
+        )
+    """
+    wanted = set(codes)
+
+    def _pred(result: Any) -> bool:
+        code = getattr(result, "status_code", None)
+        if code is None:
+            code = getattr(result, "status", None)
+        return code in wanted
+
+    return _pred
+
+
 def retry_if_message(*needles: str, case_insensitive: bool = True) -> RetryPredicate:
     """Exception mesajında verilen alt dizelerden biri varsa True."""
 
@@ -104,6 +126,7 @@ def not_(pred: RetryPredicate) -> RetryPredicate:
 
 __all__ = [
     "retry_if_status",
+    "retry_if_result_status",
     "retry_if_message",
     "retry_if_empty",
     "retry_if_falsy",

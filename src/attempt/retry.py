@@ -7,6 +7,7 @@
 - Opsiyonel retry_if predicate ile ince taneli exception kontrolü
 - Opsiyonel retry_if_result predicate ile sonuç tabanlı yeniden deneme
 - HTTP Retry-After (saniye veya RFC 7231 HTTP-date) / exception.retry_after
+- Retry-After reddedilen sonuç nesnelerinden de okunur (Response 429 vb.)
 - Decorator ve fonksiyon arayüzü (sync + async)
 - RetryError: son exception + deneme sayısı + deneme geçmişi
 """
@@ -25,7 +26,7 @@ T = TypeVar("T")
 ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException], ...]]
 RetryPredicate = Callable[[BaseException], bool]
 ResultPredicate = Callable[[Any], bool]
-RetryAfterExtractor = Callable[[BaseException], Optional[float]]
+RetryAfterExtractor = Callable[[Any], Optional[float]]
 JitterMode = Union[bool, Literal["full", "equal"]]
 
 
@@ -110,21 +111,24 @@ def _parse_http_date_delay(value: Any) -> Optional[float]:
     return max(0.0, delta)
 
 
-def extract_retry_after(exc: BaseException) -> Optional[float]:
-    """Exception üzerinden sunucunun önerdiği bekleme süresini (saniye) çıkar.
+def extract_retry_after(source: Any) -> Optional[float]:
+    """Exception veya Response benzeri nesneden önerilen beklemeyi (saniye) çıkar.
 
     Sıra:
-      1. ``exc.retry_after`` (sayı, sayıya çevrilebilir string veya HTTP-date)
-      2. ``exc.headers['Retry-After']`` / ``retry-after``
+      1. ``source.retry_after`` (sayı, sayıya çevrilebilir string veya HTTP-date)
+      2. ``source.headers['Retry-After']`` / ``retry-after``
          - delay-seconds (``Retry-After: 120``)
          - RFC 7231 HTTP-date (``Retry-After: Wed, 21 Oct 2015 07:28:00 GMT``)
 
+    Exception yükseltmeden dönen HTTP 429/503 Response nesnelerinde de çalışır.
     Parse edilemezse None döner; o durumda normal backoff kullanılır.
     Geçmiş bir HTTP-date 0 saniye olarak yorumlanır.
     """
-    value: Any = getattr(exc, "retry_after", None)
+    if source is None:
+        return None
+    value: Any = getattr(source, "retry_after", None)
     if value is None:
-        headers = getattr(exc, "headers", None)
+        headers = getattr(source, "headers", None)
         if headers is not None:
             getter = getattr(headers, "get", None)
             if callable(getter):
@@ -201,18 +205,21 @@ def _resolve_delay(
     exponential_base: float,
     jitter: JitterMode,
     last_exc: Optional[BaseException],
+    last_result: Any,
     retry_after: Optional[RetryAfterExtractor],
 ) -> float:
     delay = _compute_delay(
         attempt_num, base_delay, max_delay, exponential_base, jitter
     )
-    if last_exc is not None and retry_after is not None:
-        hinted = retry_after(last_exc)
-        if hinted is not None:
-            try:
-                delay = min(max(0.0, float(hinted)), max_delay)
-            except (TypeError, ValueError):
-                pass
+    if retry_after is not None:
+        source = last_exc if last_exc is not None else last_result
+        if source is not None:
+            hinted = retry_after(source)
+            if hinted is not None:
+                try:
+                    delay = min(max(0.0, float(hinted)), max_delay)
+                except (TypeError, ValueError):
+                    pass
     return delay
 
 
@@ -281,6 +288,7 @@ def attempt(
             exponential_base,
             jitter,
             last_exc,
+            last_result,
             retry_after,
         )
         history[-1].delay = delay
@@ -412,6 +420,7 @@ async def async_attempt(
             exponential_base,
             jitter,
             last_exc,
+            last_result,
             retry_after,
         )
         history[-1].delay = delay

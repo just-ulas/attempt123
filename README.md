@@ -11,9 +11,10 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - Belirli exception türlerini yakalama / yok sayma
 - **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı
 - **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme
-- **`retry_after`**: sunucunun önerdiği bekleme süresini onurlandırır (`Retry-After` / `exc.retry_after`)
-- **HTTP-date `Retry-After`**: RFC 7231 tarih değerleri saniyeye çevrilir (`Wed, 21 Oct 2015 07:28:00 GMT`)
-- Hazır predicate'ler: `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
+- **`retry_after`**: sunucunun önerdiği bekleme süresini onurlandırır (`Retry-After` / `retry_after`)
+- **HTTP-date `Retry-After`**: RFC 7231 tarih değerleri saniyeye çevrilir
+- **Sonuç nesnelerinden Retry-After**: exception yükseltmeyen 429/503 Response'lar da sunucu beklemesini kullanır
+- Hazır predicate'ler: `retry_if_status`, `retry_if_result_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
 - Predicate birleştirme: **`any_of` / `all_of` / `not_`**
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
@@ -71,6 +72,25 @@ items = attempt(
 )
 ```
 
+### HTTP Response (exception yükseltmeden 429/503)
+
+Birçok HTTP istemcisi rate-limit'i exception olarak değil, `Response` olarak döner.
+`retry_if_result_status` sonucu reddeder; `extract_retry_after` aynı nesnenin
+`Retry-After` başlığını okur ve backoff yerine sunucunun süresini kullanır.
+
+```python
+from attempt import attempt, extract_retry_after, retry_if_result_status
+
+response = attempt(
+    lambda: session.get(url),
+    max_attempts=6,
+    base_delay=0.5,
+    max_delay=30.0,
+    retry_if_result=retry_if_result_status(429, 502, 503, 504),
+    retry_after=extract_retry_after,
+)
+```
+
 ### HTTP Retry-After (saniye veya HTTP-date)
 
 ```python
@@ -86,7 +106,10 @@ result = attempt(
 )
 ```
 
-`extract_retry_after` sırasıyla `exc.retry_after` ve `exc.headers["Retry-After"]` değerlerine bakar.
+`extract_retry_after` hem exception hem Response benzeri nesnelerde çalışır:
+
+1. `obj.retry_after`
+2. `obj.headers["Retry-After"]` / `retry-after`
 
 - `Retry-After: 120` → 120 saniye
 - `Retry-After: Wed, 21 Oct 2015 07:28:00 GMT` → tarihe kalan saniye (geçmişse 0)
@@ -128,12 +151,12 @@ async def fetch_async(url: str) -> dict:
 | `exceptions` | `(Exception,)` | Yakalanacak sınıflar |
 | `retry_if` | `None` | `exc -> bool` |
 | `retry_if_result` | `None` | `result -> bool` (True ise reddet) |
-| `retry_after` | `None` | `exc -> float|None` önerilen bekleme |
+| `retry_after` | `None` | `exc|result -> float|None` önerilen bekleme |
 | `on_retry` | `None` | Callback |
 | `timeout` | `None` | Toplam süre sınırı |
 | `reraise_as_retry_error` | `False` | `RetryError` yükselt |
 
-**Yardımcılar:** `extract_retry_after`, `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`, `any_of`, `all_of`, `not_`, `always`
+**Yardımcılar:** `extract_retry_after`, `retry_if_status`, `retry_if_result_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`, `any_of`, `all_of`, `not_`, `always`
 
 ## Testler
 
