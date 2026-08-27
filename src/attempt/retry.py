@@ -1,11 +1,3 @@
-"""
-Uretim kalitesinde retry / attempt yardimcilari.
-
-- Exponential backoff + opsiyonel jitter (equal veya AWS full jitter)
-- Circuit breaker entegrasyonu (acik devrede kisa devre)
-- Decorator ve fonksiyon arayuzu (sync + async)
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -29,13 +21,13 @@ JitterMode = Union[bool, Literal["full", "equal"]]
 class RetryAttempt:
     __slots__ = ("number", "exception", "result", "delay")
 
-    def __init__(self, number: int, exception: Optional[BaseException] = None, result: Any = None, delay: Optional[float] = None) -> None:
+    def __init__(self, number, exception=None, result=None, delay=None):
         self.number = number
         self.exception = exception
         self.result = result
         self.delay = delay
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         if self.exception is not None:
             detail = f"exc={type(self.exception).__name__}({self.exception!s})"
         else:
@@ -45,7 +37,7 @@ class RetryAttempt:
 
 
 class RetryError(Exception):
-    def __init__(self, last_exception: Optional[BaseException] = None, attempts: int = 0, last_result: Any = None, history: Optional[List[RetryAttempt]] = None) -> None:
+    def __init__(self, last_exception=None, attempts=0, last_result=None, history=None):
         self.last_exception = last_exception
         self.attempts = attempts
         self.last_result = last_result
@@ -57,7 +49,7 @@ class RetryError(Exception):
         super().__init__(message)
 
 
-def _parse_http_date_delay(value: Any) -> Optional[float]:
+def _parse_http_date_delay(value):
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -77,10 +69,10 @@ def _parse_http_date_delay(value: Any) -> Optional[float]:
     return max(0.0, delta)
 
 
-def extract_retry_after(source: Any) -> Optional[float]:
+def extract_retry_after(source):
     if source is None:
         return None
-    value: Any = getattr(source, "retry_after", None)
+    value = getattr(source, "retry_after", None)
     if value is None:
         headers = getattr(source, "headers", None)
         if headers is not None:
@@ -104,7 +96,7 @@ def extract_retry_after(source: Any) -> Optional[float]:
     return max(0.0, seconds)
 
 
-def _compute_delay(attempt_number: int, base_delay: float, max_delay: float, exponential_base: float, jitter: JitterMode) -> float:
+def _compute_delay(attempt_number, base_delay, max_delay, exponential_base, jitter):
     delay = min(base_delay * (exponential_base ** (attempt_number - 1)), max_delay)
     if delay <= 0:
         return 0.0
@@ -115,19 +107,19 @@ def _compute_delay(attempt_number: int, base_delay: float, max_delay: float, exp
     return delay * (0.75 + random.random() * 0.5)
 
 
-def _should_retry(exc: BaseException, retry_if: Optional[RetryPredicate]) -> bool:
+def _should_retry(exc, retry_if):
     if retry_if is None:
         return True
     return bool(retry_if(exc))
 
 
-def _should_retry_result(result: Any, retry_if_result: Optional[ResultPredicate]) -> bool:
+def _should_retry_result(result, retry_if_result):
     if retry_if_result is None:
         return False
     return bool(retry_if_result(result))
 
 
-def _validate_params(max_attempts: int, base_delay: float, max_delay: float, exponential_base: float, timeout: Optional[float]) -> None:
+def _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout):
     if max_attempts < 1:
         raise ValueError("max_attempts en az 1 olmalidir")
     if base_delay < 0:
@@ -140,7 +132,7 @@ def _validate_params(max_attempts: int, base_delay: float, max_delay: float, exp
         raise ValueError("timeout negatif olamaz")
 
 
-def _resolve_delay(attempt_num: int, base_delay: float, max_delay: float, exponential_base: float, jitter: JitterMode, last_exc: Optional[BaseException], last_result: Any, retry_after: Optional[RetryAfterExtractor]) -> float:
+def _resolve_delay(attempt_num, base_delay, max_delay, exponential_base, jitter, last_exc, last_result, retry_after):
     delay = _compute_delay(attempt_num, base_delay, max_delay, exponential_base, jitter)
     if retry_after is not None:
         source = last_exc if last_exc is not None else last_result
@@ -154,7 +146,7 @@ def _resolve_delay(attempt_num: int, base_delay: float, max_delay: float, expone
     return delay
 
 
-def _raise_if_circuit_open(circuit: Optional[CircuitBreaker], attempt_num: int, last_result: Any, history: List[RetryAttempt], reraise_as_retry_error: bool) -> None:
+def _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_as_retry_error):
     if circuit is None or circuit.allow():
         return
     wait = circuit.seconds_until_retry()
@@ -167,3 +159,187 @@ def _raise_if_circuit_open(circuit: Optional[CircuitBreaker], attempt_num: int, 
     if reraise_as_retry_error:
         raise RetryError(err, done, last_result, history=history) from err
     raise err
+
+
+def attempt(
+    func,
+    *,
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    exceptions=(Exception,),
+    retry_if=None,
+    retry_if_result=None,
+    retry_after=None,
+    on_retry=None,
+    timeout=None,
+    reraise_as_retry_error=False,
+    circuit=None,
+):
+    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
+    start_time = time.monotonic()
+    last_exc = None
+    last_result = None
+    history = []
+
+    for attempt_num in range(1, max_attempts + 1):
+        _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_as_retry_error)
+        if timeout is not None and (time.monotonic() - start_time) >= timeout:
+            if last_exc is not None:
+                if reraise_as_retry_error:
+                    raise RetryError(last_exc, attempt_num - 1, history=history) from last_exc
+                raise last_exc
+            if last_result is not None or retry_if_result is not None:
+                if reraise_as_retry_error:
+                    raise RetryError(None, attempt_num - 1, last_result, history=history)
+                raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
+            raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+
+        try:
+            result = func()
+            if not _should_retry_result(result, retry_if_result):
+                if circuit is not None:
+                    circuit.record_success()
+                return result
+            last_result = result
+            last_exc = None
+            if circuit is not None:
+                circuit.record_failure()
+            history.append(RetryAttempt(attempt_num, result=result))
+            if attempt_num >= max_attempts:
+                if reraise_as_retry_error:
+                    raise RetryError(None, attempt_num, last_result, history=history)
+                raise RuntimeError(f"{attempt_num} deneme sonunda sonuc kabul edilmedi: {last_result!r}")
+        except CircuitOpenError:
+            raise
+        except exceptions as exc:
+            last_exc = exc
+            last_result = None
+            if circuit is not None:
+                circuit.record_failure()
+            history.append(RetryAttempt(attempt_num, exception=exc))
+            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
+                if reraise_as_retry_error:
+                    raise RetryError(exc, attempt_num, history=history) from exc
+                raise
+
+        delay = _resolve_delay(attempt_num, base_delay, max_delay, exponential_base, jitter, last_exc, last_result, retry_after)
+        history[-1].delay = delay
+        if on_retry is not None:
+            on_retry(attempt_num, last_exc, delay)
+        if delay > 0:
+            if timeout is not None:
+                remaining = timeout - (time.monotonic() - start_time)
+                if remaining <= 0:
+                    if last_exc is not None:
+                        if reraise_as_retry_error:
+                            raise RetryError(last_exc, attempt_num, history=history) from last_exc
+                        raise last_exc
+                    if reraise_as_retry_error:
+                        raise RetryError(None, attempt_num, last_result, history=history)
+                    raise RuntimeError("Timeout asildi; sonuc kabul edilmedi")
+                delay = min(delay, remaining)
+            time.sleep(delay)
+
+    if last_exc is not None:
+        if reraise_as_retry_error:
+            raise RetryError(last_exc, max_attempts, history=history) from last_exc
+        raise last_exc
+    if reraise_as_retry_error:
+        raise RetryError(None, max_attempts, last_result, history=history)
+    raise RuntimeError(f"{max_attempts} deneme sonunda sonuc kabul edilmedi")
+
+
+def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit)
+        return wrapper
+    return decorator
+
+
+async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
+    start_time = time.monotonic()
+    last_exc = None
+    last_result = None
+    history = []
+
+    for attempt_num in range(1, max_attempts + 1):
+        _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_as_retry_error)
+        if timeout is not None and (time.monotonic() - start_time) >= timeout:
+            if last_exc is not None:
+                if reraise_as_retry_error:
+                    raise RetryError(last_exc, attempt_num - 1, history=history) from last_exc
+                raise last_exc
+            if last_result is not None or retry_if_result is not None:
+                if reraise_as_retry_error:
+                    raise RetryError(None, attempt_num - 1, last_result, history=history)
+                raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
+            raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+
+        try:
+            result = await func()
+            if not _should_retry_result(result, retry_if_result):
+                if circuit is not None:
+                    circuit.record_success()
+                return result
+            last_result = result
+            last_exc = None
+            if circuit is not None:
+                circuit.record_failure()
+            history.append(RetryAttempt(attempt_num, result=result))
+            if attempt_num >= max_attempts:
+                if reraise_as_retry_error:
+                    raise RetryError(None, attempt_num, last_result, history=history)
+                raise RuntimeError(f"{attempt_num} deneme sonunda sonuc kabul edilmedi: {last_result!r}")
+        except CircuitOpenError:
+            raise
+        except exceptions as exc:
+            last_exc = exc
+            last_result = None
+            if circuit is not None:
+                circuit.record_failure()
+            history.append(RetryAttempt(attempt_num, exception=exc))
+            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
+                if reraise_as_retry_error:
+                    raise RetryError(exc, attempt_num, history=history) from exc
+                raise
+
+        delay = _resolve_delay(attempt_num, base_delay, max_delay, exponential_base, jitter, last_exc, last_result, retry_after)
+        history[-1].delay = delay
+        if on_retry is not None:
+            on_retry(attempt_num, last_exc, delay)
+        if delay > 0:
+            if timeout is not None:
+                remaining = timeout - (time.monotonic() - start_time)
+                if remaining <= 0:
+                    if last_exc is not None:
+                        if reraise_as_retry_error:
+                            raise RetryError(last_exc, attempt_num, history=history) from last_exc
+                        raise last_exc
+                    if reraise_as_retry_error:
+                        raise RetryError(None, attempt_num, last_result, history=history)
+                    raise RuntimeError("Timeout asildi; sonuc kabul edilmedi")
+                delay = min(delay, remaining)
+            await asyncio.sleep(delay)
+
+    if last_exc is not None:
+        if reraise_as_retry_error:
+            raise RetryError(last_exc, max_attempts, history=history) from last_exc
+        raise last_exc
+    if reraise_as_retry_error:
+        raise RetryError(None, max_attempts, last_result, history=history)
+    raise RuntimeError(f"{max_attempts} deneme sonunda sonuc kabul edilmedi")
+
+
+def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit)
+        return wrapper
+    return decorator
