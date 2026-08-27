@@ -9,165 +9,74 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Exponential backoff** + jitter (equal ±%25 veya **AWS full jitter**)
 - Maksimum deneme sayısı ve toplam zaman aşımı kontrolü
 - Belirli exception türlerini yakalama / yok sayma
-- **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı (ör. sadece HTTP 429/503)
-- **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme (ör. boş liste, gövdede hata alanı)
+- **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı
+- **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme
+- **`retry_after`**: sunucunun önerdiği bekleme süresini onurlandırır (`Retry-After` / `exc.retry_after`)
+- Hazır predicate'ler: `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
+- **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
-- **RetryError**: son exception / reddedilen sonuç + deneme sayısını birlikte taşıyan sarmalayıcı
 - Tamamen standart kütüphane — ekstra bağımlılık yok
-- Tip ipuçları ve kapsamlı docstring’ler
 
 ## Kurulum
 
 ```bash
 pip install -e .
-# veya sadece dosyayı kopyalayın
 ```
 
 ## Hızlı Kullanım
 
-### Decorator olarak (sync)
-
-```python
-from attempt import retry
-
-@retry(max_attempts=5, base_delay=0.5, max_delay=10.0, exceptions=(ConnectionError, TimeoutError))
-def fetch_data(url: str) -> dict:
-    # geçici hata verebilecek kod
-    ...
-```
-
-### Fonksiyon olarak (sync)
-
-```python
-from attempt import attempt
-
-result = attempt(
-    lambda: requests.get("https://api.example.com/data").json(),
-    max_attempts=4,
-    base_delay=1.0,
-    exceptions=(requests.RequestException,),
-)
-```
-
-### Jitter stratejileri
-
-Varsayılan `jitter=True` (veya `"equal"`) ±%25 equal jitter uygular. Dağıtık sistemlerde thundering herd’ü daha iyi önlemek için AWS’in önerdiği **full jitter** kullanılabilir:
+### Decorator / fonksiyon
 
 ```python
 from attempt import retry, attempt
 
-# Full jitter: bekleme süresi [0, computed_delay] aralığından seçilir
-@retry(jitter="full", max_attempts=6, base_delay=0.5, max_delay=30.0)
-def call_many_clients():
+@retry(max_attempts=5, base_delay=0.5, exceptions=(ConnectionError, TimeoutError))
+def fetch_data(url: str) -> dict:
     ...
 
 result = attempt(
-    lambda: remote_call(),
-    max_attempts=5,
+    lambda: do_call(),
+    max_attempts=4,
     base_delay=1.0,
-    jitter="full",  # AWS Architecture Blog önerisi
 )
 ```
 
-| `jitter` değeri | Davranış |
-|-----------------|----------|
-| `True` / `"equal"` | ±%25 equal jitter (varsayılan, geriye uyumlu) |
-| `"full"` | `[0, delay]` uniform — full jitter |
-| `False` | Jitter yok, saf exponential |
-
-### İnce taneli kontrol: `retry_if`
-
-Sadece belirli durum kodlarında yeniden denemek için:
+### Hazır predicate'ler
 
 ```python
-from attempt import attempt
-
-def should_retry(exc: BaseException) -> bool:
-    # Örnek: HTTP hata nesnesinde status_code varsa sadece 429/503’te dene
-    code = getattr(exc, "status_code", None)
-    return code in (429, 503)
+from attempt import attempt, retry_if_status, retry_if_message, retry_if_empty
 
 result = attempt(
     lambda: call_api(),
     max_attempts=5,
-    base_delay=1.0,
-    exceptions=(Exception,),
-    retry_if=should_retry,
+    retry_if=retry_if_status(429, 502, 503, 504),
 )
-```
 
-Decorator ile:
-
-```python
-@retry(
-    max_attempts=5,
-    base_delay=0.5,
-    retry_if=lambda e: "rate limit" in str(e).lower(),
-)
-def fetch():
-    ...
-```
-
-### Sonuç tabanlı yeniden deneme: `retry_if_result`
-
-Exception fırlatmayan ama “başarısız” sayılan dönüş değerlerinde (boş liste, hata alanı olan JSON vb.) yeniden denemek için:
-
-```python
-from attempt import attempt
-
-# Boş liste gelirse tekrar dene
 items = attempt(
-    lambda: fetch_items_from_api(),
-    max_attempts=4,
+    lambda: fetch_items(),
+    retry_if_result=retry_if_empty,
+)
+```
+
+### HTTP Retry-After
+
+```python
+from attempt import attempt, extract_retry_after, retry_if_status
+
+result = attempt(
+    lambda: call_rate_limited_api(),
+    max_attempts=6,
     base_delay=0.5,
-    retry_if_result=lambda r: r is None or len(r) == 0,
-)
-
-# API 200 dönse bile gövdede error varsa tekrar dene
-payload = attempt(
-    lambda: client.get("/resource").json(),
-    max_attempts=5,
-    retry_if_result=lambda body: body.get("error") is not None,
+    max_delay=30.0,
+    retry_if=retry_if_status(429, 503),
+    retry_after=extract_retry_after,
 )
 ```
 
-Decorator ile:
+`extract_retry_after` sırasıyla `exc.retry_after` ve `exc.headers["Retry-After"]` değerlerine bakar. Parse edilemezse normal exponential backoff kullanılır. Önerilen süre `max_delay` ile sınırlanır.
 
-```python
-@retry(retry_if_result=lambda r: not r.get("ok", False), max_attempts=3)
-def call_service() -> dict:
-    ...
-```
-
-Denemeler tükendiğinde `RetryError` ( `reraise_as_retry_error=True` ise) veya açıklayıcı bir `RuntimeError` yükseltilir; `RetryError.last_result` reddedilen son değeri taşır.
-
-### Async kullanım
-
-```python
-from attempt import async_retry, async_attempt
-
-@async_retry(max_attempts=5, base_delay=0.5, exceptions=(ConnectionError,), jitter="full")
-async def fetch_async(url: str) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            return await resp.json()
-
-# veya doğrudan:
-result = await async_attempt(
-    lambda: some_async_call(),
-    max_attempts=3,
-    base_delay=1.0,
-)
-
-# async + sonuç predicate
-result = await async_attempt(
-    lambda: fetch_async_list(),
-    retry_if_result=lambda r: len(r) == 0,
-)
-```
-
-### RetryError ile daha anlamlı hata mesajı
+### RetryError geçmişi
 
 ```python
 from attempt import attempt, RetryError
@@ -175,30 +84,39 @@ from attempt import attempt, RetryError
 try:
     attempt(fragile_fn, max_attempts=3, reraise_as_retry_error=True)
 except RetryError as e:
-    print(e.attempts)          # 3
-    print(e.last_exception)    # orijinal exception (veya None)
-    print(e.last_result)       # reddedilen sonuç (varsa)
+    print(e.attempts, e.last_exception, e.last_result)
+    for step in e.history:
+        print(step.number, step.exception, step.result, step.delay)
+```
+
+### Async
+
+```python
+from attempt import async_retry, extract_retry_after
+
+@async_retry(max_attempts=5, jitter="full", retry_after=extract_retry_after)
+async def fetch_async(url: str) -> dict:
+    ...
 ```
 
 ## API Özeti
 
-| Parametre                 | Varsayılan     | Açıklama                                      |
-|---------------------------|----------------|-----------------------------------------------|
-| `max_attempts`            | `3`            | Maksimum deneme sayısı                        |
-| `base_delay`              | `1.0`          | İlk bekleme süresi (saniye)                   |
-| `max_delay`               | `60.0`         | Üst sınır bekleme süresi                      |
-| `exponential_base`        | `2.0`          | Üstel çarpan                                  |
-| `jitter`                  | `True`         | `True`/`"equal"` (±%25), `"full"` (AWS), `False` |
-| `exceptions`              | `(Exception,)` | Yakalanacak exception sınıfları               |
-| `retry_if`                | `None`         | `exc -> bool`; False ise hemen yükselt        |
-| `retry_if_result`         | `None`         | `result -> bool`; True ise sonucu reddet ve yeniden dene |
-| `on_retry`                | `None`         | Her yeniden denemede çağrılacak callback      |
-| `timeout`                 | `None`         | Toplam maksimum çalışma süresi (saniye)       |
-| `reraise_as_retry_error`  | `False`        | Başarısızlıkta `RetryError` yükselt           |
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `max_attempts` | `3` | Maksimum deneme sayısı |
+| `base_delay` | `1.0` | İlk bekleme (saniye) |
+| `max_delay` | `60.0` | Üst sınır bekleme |
+| `exponential_base` | `2.0` | Üstel çarpan |
+| `jitter` | `True` | `True`/`"equal"`, `"full"`, `False` |
+| `exceptions` | `(Exception,)` | Yakalanacak sınıflar |
+| `retry_if` | `None` | `exc -> bool` |
+| `retry_if_result` | `None` | `result -> bool` (True ise reddet) |
+| `retry_after` | `None` | `exc -> float|None` önerilen bekleme |
+| `on_retry` | `None` | Callback |
+| `timeout` | `None` | Toplam süre sınırı |
+| `reraise_as_retry_error` | `False` | `RetryError` yükselt |
 
-**Sync API:** `attempt()`, `@retry`  
-**Async API:** `async_attempt()`, `@async_retry`  
-**Hata sınıfı:** `RetryError` (`last_exception`, `attempts`, `last_result`)
+**Yardımcılar:** `extract_retry_after`, `retry_if_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
 
 ## Testler
 
@@ -206,8 +124,6 @@ except RetryError as e:
 pip install -e ".[test]"
 python -m pytest tests/ -v
 ```
-
-Async testler için `pytest-asyncio` önerilir (otomatik algılanır).
 
 ## Lisans
 
