@@ -3,31 +3,29 @@ attempt123 – basit, bağımlılıksız retry / attempt yardımcı kütüphanes
 
 Kullanım:
     from attempt import retry, attempt, async_retry, async_attempt, RetryError
+    from attempt import extract_retry_after, retry_if_status, retry_if_empty
 
-    @retry(max_attempts=5)
+    @retry(max_attempts=5, retry_after=extract_retry_after)
     def fragile():
         ...
 
-    @async_retry(max_attempts=5)
-    async def fragile_async():
-        ...
-
-    result = attempt(lambda: do_something(), max_attempts=3)
-    result = await async_attempt(lambda: do_something_async(), max_attempts=3)
-
-    # Sonuç tabanlı yeniden deneme:
     result = attempt(
         lambda: fetch_list(),
-        retry_if_result=lambda r: r is None or len(r) == 0,
+        retry_if_result=retry_if_empty,
+        reraise_as_retry_error=True,
     )
-
-    # AWS full jitter (dağıtık sistemler için):
-    @retry(jitter="full", max_attempts=5)
-    def call_remote():
-        ...
 """
 
-from .retry import RetryError, async_attempt, async_retry, attempt, retry
+from .predicates import retry_if_empty, retry_if_falsy, retry_if_message, retry_if_status
+from .retry import (
+    RetryAttempt,
+    RetryError,
+    async_attempt,
+    async_retry,
+    attempt,
+    extract_retry_after,
+    retry,
+)
 
 __all__ = [
     "retry",
@@ -35,5 +33,11 @@ __all__ = [
     "async_retry",
     "async_attempt",
     "RetryError",
+    "RetryAttempt",
+    "extract_retry_after",
+    "retry_if_status",
+    "retry_if_message",
+    "retry_if_empty",
+    "retry_if_falsy",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"
