@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable, List, Literal, Optional, Tuple, Type, TypeVar, Union
 
 from .circuit import CircuitBreaker, CircuitOpenError
+from .limiter import RateLimitError, RateLimiter
 
 T = TypeVar("T")
 ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException], ...]]
@@ -161,6 +162,27 @@ def _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_a
     raise err
 
 
+def _limiter_wait_budget(timeout, start_time):
+    if timeout is None:
+        return None
+    return max(0.0, timeout - (time.monotonic() - start_time))
+
+
+def _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_retry_error):
+    wait = limiter.seconds_until_available(1.0)
+    wait_display = wait if wait != float("inf") else None
+    err = RateLimitError(
+        f"RateLimiter {limiter.name!r} token vermedi"
+        + (f"; {wait:.3f}s sonra denenebilir" if wait_display is not None else ""),
+        retry_after=wait_display,
+        limiter=limiter,
+    )
+    done = max(0, attempt_num - 1)
+    if reraise_as_retry_error:
+        raise RetryError(err, done, last_result, history=history) from err
+    raise err
+
+
 def attempt(
     func,
     *,
@@ -177,6 +199,7 @@ def attempt(
     timeout=None,
     reraise_as_retry_error=False,
     circuit=None,
+    limiter=None,
 ):
     _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
     start_time = time.monotonic()
@@ -197,6 +220,11 @@ def attempt(
                 raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
             raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
 
+        if limiter is not None:
+            budget = _limiter_wait_budget(timeout, start_time)
+            if not limiter.acquire(1.0, timeout=budget):
+                _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_retry_error)
+
         try:
             result = func()
             if not _should_retry_result(result, retry_if_result):
@@ -213,6 +241,8 @@ def attempt(
                     raise RetryError(None, attempt_num, last_result, history=history)
                 raise RuntimeError(f"{attempt_num} deneme sonunda sonuc kabul edilmedi: {last_result!r}")
         except CircuitOpenError:
+            raise
+        except RateLimitError:
             raise
         except exceptions as exc:
             last_exc = exc
@@ -252,16 +282,16 @@ def attempt(
     raise RuntimeError(f"{max_attempts} deneme sonunda sonuc kabul edilmedi")
 
 
-def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit)
+            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter)
         return wrapper
     return decorator
 
 
-async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None):
     _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
     start_time = time.monotonic()
     last_exc = None
@@ -281,6 +311,11 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
                 raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
             raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
 
+        if limiter is not None:
+            budget = _limiter_wait_budget(timeout, start_time)
+            if not await limiter.acquire_async(1.0, timeout=budget):
+                _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_retry_error)
+
         try:
             result = await func()
             if not _should_retry_result(result, retry_if_result):
@@ -297,6 +332,8 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
                     raise RetryError(None, attempt_num, last_result, history=history)
                 raise RuntimeError(f"{attempt_num} deneme sonunda sonuc kabul edilmedi: {last_result!r}")
         except CircuitOpenError:
+            raise
+        except RateLimitError:
             raise
         except exceptions as exc:
             last_exc = exc
@@ -336,10 +373,10 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
     raise RuntimeError(f"{max_attempts} deneme sonunda sonuc kabul edilmedi")
 
 
-def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None):
+def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit)
+            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter)
         return wrapper
     return decorator

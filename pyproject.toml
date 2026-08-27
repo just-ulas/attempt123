@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "attempt123"
-version = "0.9.0"
-description = "Basit, bağımlılıksız ve üretim kalitesinde retry / attempt yardımcı kütüphanesi (sync + async, circuit breaker)"
+version = "0.10.0"
+description = "Basit, bağımlılıksız ve üretim kalitesinde retry / attempt yardımcı kütüphanesi (sync + async, circuit breaker, rate limiter)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "just-ulas"}
 ]
-keywords = ["retry", "backoff", "resilience", "attempt", "async", "jitter", "retry-after", "circuit-breaker"]
+keywords = ["retry", "backoff", "resilience", "attempt", "async", "jitter", "retry-after", "circuit-breaker", "rate-limiter", "token-bucket"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

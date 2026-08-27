@@ -17,6 +17,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - Hazır predicate'ler: `retry_if_status`, `retry_if_result_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
 - Predicate birleştirme: **`any_of` / `all_of` / `not_`**
 - **Circuit breaker**: ardışık hatalarda çağrıları keser, recovery sonrası probe eder
+- **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
@@ -76,6 +77,32 @@ except CircuitOpenError as exc:
 
 Aynı `CircuitBreaker` örneğini birden fazla `attempt` / decorator arasında paylaşın.
 `breaker.reset()` ile manuel kapatabilirsiniz.
+
+### Rate limiter
+
+Paylaşılan token-bucket, saniyedeki çağrı sayısını sınırlar. Retry döngüsü her denemeden
+önce bir token alır; kova boşsa timeout bütçesi içinde bekler, yetmezse `RateLimitError`.
+
+```python
+from attempt import RateLimiter, RateLimitError, attempt
+
+http = RateLimiter(rate=8, burst=16, name="upstream")
+
+try:
+    result = attempt(
+        lambda: client.get(url),
+        max_attempts=4,
+        base_delay=0.1,
+        limiter=http,
+        timeout=5.0,
+    )
+except RateLimitError as exc:
+    # exc.retry_after → sonraki token'a kalan saniye
+    queue_for_later()
+```
+
+Limiter circuit breaker ile birlikte kullanılabilir: önce açık devre kontrolü, sonra token.
+`limiter.try_acquire()` / `acquire_async()` retry dışında da çağrılabilir.
 
 ## Testler
 

@@ -6,10 +6,12 @@ Kullanım:
     from attempt import extract_retry_after, retry_if_status, retry_if_empty
     from attempt import retry_if_result_status, any_of, all_of, not_
     from attempt import CircuitBreaker, CircuitOpenError
+    from attempt import RateLimiter, RateLimitError
 
+    limiter = RateLimiter(rate=5, burst=10, name="payments")
     breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=15.0, name="payments")
 
-    @retry(max_attempts=5, retry_after=extract_retry_after, circuit=breaker)
+    @retry(max_attempts=5, retry_after=extract_retry_after, circuit=breaker, limiter=limiter)
     def fragile():
         ...
 
@@ -18,11 +20,13 @@ Kullanım:
         retry_if_result=retry_if_result_status(429, 503),
         retry_after=extract_retry_after,
         circuit=breaker,
+        limiter=limiter,
         reraise_as_retry_error=True,
     )
 """
 
 from .circuit import CircuitBreaker, CircuitOpenError, CircuitState
+from .limiter import RateLimitError, RateLimiter
 from .predicates import (
     all_of,
     always,
@@ -64,5 +68,7 @@ __all__ = [
     "CircuitBreaker",
     "CircuitOpenError",
     "CircuitState",
+    "RateLimiter",
+    "RateLimitError",
 ]
-__version__ = "0.9.0"
+__version__ = "0.10.0"
