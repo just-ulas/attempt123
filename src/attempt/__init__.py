@@ -7,7 +7,7 @@ Kullanım:
     from attempt import retry_if_result_status, any_of, all_of, not_
     from attempt import CircuitBreaker, CircuitOpenError
     from attempt import RateLimiter, RateLimitError
-    from attempt import RetryBudget
+    from attempt import RetryBudget, GiveUpContext
 
     limiter = RateLimiter(rate=5, burst=10, name="payments")
     breaker = CircuitBreaker(
@@ -18,7 +18,14 @@ Kullanım:
     )
     budget = RetryBudget(window=10.0, retry_ratio=0.2, min_retries=10, name="payments")
 
-    @retry(max_attempts=5, retry_after=extract_retry_after, circuit=breaker, limiter=limiter, budget=budget)
+    @retry(
+        max_attempts=5,
+        retry_after=extract_retry_after,
+        circuit=breaker,
+        limiter=limiter,
+        budget=budget,
+        fallback=lambda ctx: cached_quote(ctx),
+    )
     def fragile():
         ...
 
@@ -29,6 +36,7 @@ Kullanım:
         circuit=breaker,
         limiter=limiter,
         budget=budget,
+        fallback=lambda: default_payload(),
         reraise_as_retry_error=True,
     )
 """
@@ -48,6 +56,7 @@ from .predicates import (
     retry_if_status,
 )
 from .retry import (
+    GiveUpContext,
     RetryAttempt,
     RetryError,
     async_attempt,
@@ -64,6 +73,7 @@ __all__ = [
     "async_attempt",
     "RetryError",
     "RetryAttempt",
+    "GiveUpContext",
     "extract_retry_after",
     "retry_if_status",
     "retry_if_result_status",
@@ -81,4 +91,4 @@ __all__ = [
     "RateLimitError",
     "RetryBudget",
 ]
-__version__ = "0.12.0"
+__version__ = "0.13.0"

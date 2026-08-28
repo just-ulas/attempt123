@@ -19,6 +19,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Circuit breaker**: ardışık hatalarda çağrıları keser; half-open'da **eşzamanlı probe limiti** (`max_half_open`) ile recovery'yi izole eder; thread-safe
 - **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
 - **Retry budget**: kayar pencerede retry oranını sınırlar; bozuk bir bağımlılık tüm kapasiteyi retry ile yemesin
+- **`fallback`**: denemeler veya bütçe bitince hata fırlatmak yerine yedek yol çalıştırır (`GiveUpContext`)
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
@@ -135,6 +136,45 @@ result = attempt(
 
 Aynı `RetryBudget` örneğini tüm çağrı noktalarında paylaşın. Outage sırasında 1000
 istekten yalnızca ~200'si retry eder; kalanı fail-fast olur.
+
+### Fallback
+
+Denemeler tükenince, `retry_if` hayır deyince veya retry bütçesi bitince varsayılan
+davranış hata yükseltmektir. `fallback` verildiğinde bunun yerine yedek yol çalışır:
+önbellek, varsayılan payload, alternatif servis.
+
+`fallback` ya argümansız çağrılır ya da bir `GiveUpContext` alır (`exception`,
+`result`, `history`, `attempts`). Async yolda fallback kendisi de `async` olabilir.
+
+```python
+from attempt import GiveUpContext, attempt
+
+def stale_quote(ctx: GiveUpContext):
+    # ctx.exception / ctx.result / ctx.history kullanılabilir
+    return cache.get("last_good_quote") or {"price": None, "stale": True}
+
+quote = attempt(
+    lambda: market.ticker(symbol),
+    max_attempts=4,
+    base_delay=0.15,
+    jitter="full",
+    fallback=stale_quote,
+)
+```
+
+Decorator:
+
+```python
+from attempt import retry
+
+@retry(max_attempts=3, base_delay=0.2, fallback=lambda: {"ok": False})
+def ping():
+    ...
+```
+
+Başarılı bir deneme fallback'i çağırmaz. Circuit / rate-limit hataları hâlâ
+kendi exception'larını yükseltir; fallback yalnızca asıl iş fonksiyonunun
+tükettiği denemeler içindir.
 
 ## Testler
 
