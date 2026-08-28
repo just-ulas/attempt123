@@ -16,7 +16,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Sonuç nesnelerinden Retry-After**: exception yükseltmeyen 429/503 Response'lar da sunucu beklemesini kullanır
 - Hazır predicate'ler: `retry_if_status`, `retry_if_result_status`, `retry_if_message`, `retry_if_empty`, `retry_if_falsy`
 - Predicate birleştirme: **`any_of` / `all_of` / `not_`**
-- **Circuit breaker**: ardışık hatalarda çağrıları keser, recovery sonrası probe eder
+- **Circuit breaker**: ardışık hatalarda çağrıları keser; half-open'da **eşzamanlı probe limiti** (`max_half_open`) ile recovery'yi izole eder; thread-safe
 - **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
@@ -50,7 +50,9 @@ result = attempt(
 ### Circuit breaker
 
 Aynı bağımlılığa giden çağrıları paylaşan bir breaker, eşik aşılınca yeni istekleri
-hemen keser (`CircuitOpenError`). `recovery_timeout` sonra half-open probe yapılır.
+hemen keser (`CircuitOpenError`). `recovery_timeout` sonra half-open probe yapılır;
+aynı anda en fazla `max_half_open` (varsayılan 1) çağrı probe eder, kalanlar
+servisi tekrar ezmez.
 
 ```python
 from attempt import CircuitBreaker, CircuitOpenError, attempt, extract_retry_after
@@ -59,6 +61,7 @@ payments = CircuitBreaker(
     failure_threshold=5,
     recovery_timeout=20.0,
     success_threshold=2,
+    max_half_open=1,
     name="payments",
 )
 
@@ -75,7 +78,7 @@ except CircuitOpenError as exc:
     fallback()
 ```
 
-Aynı `CircuitBreaker` örneğini birden fazla `attempt` / decorator arasında paylaşın.
+Aynı `CircuitBreaker` örneğini birden fazla `attempt` / decorator / thread arasında paylaşın.
 `breaker.reset()` ile manuel kapatabilirsiniz.
 
 ### Rate limiter

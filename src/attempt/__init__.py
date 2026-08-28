@@ -9,7 +9,12 @@ Kullanım:
     from attempt import RateLimiter, RateLimitError
 
     limiter = RateLimiter(rate=5, burst=10, name="payments")
-    breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=15.0, name="payments")
+    breaker = CircuitBreaker(
+        failure_threshold=5,
+        recovery_timeout=15.0,
+        max_half_open=1,
+        name="payments",
+    )
 
     @retry(max_attempts=5, retry_after=extract_retry_after, circuit=breaker, limiter=limiter)
     def fragile():
@@ -71,4 +76,4 @@ __all__ = [
     "RateLimiter",
     "RateLimitError",
 ]
-__version__ = "0.10.0"
+__version__ = "0.11.0"

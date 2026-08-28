@@ -1,5 +1,6 @@
 """Circuit breaker birim testleri."""
 
+import threading
 import time
 from unittest.mock import AsyncMock, Mock
 
@@ -50,6 +51,7 @@ def test_half_open_success_closes():
     assert br.allow() is True
     br.record_success()
     assert br.state == "half_open"
+    br.allow()
     br.record_success()
     assert br.state == "closed"
 
@@ -59,9 +61,46 @@ def test_half_open_failure_reopens():
     br.record_failure()
     time.sleep(0.06)
     assert br.state == "half_open"
+    br.allow()
     br.record_failure()
     assert br.state == "open"
     assert br.allow() is False
+
+
+def test_half_open_rejects_extra_probes():
+    br = CircuitBreaker(failure_threshold=1, recovery_timeout=0.05, max_half_open=1)
+    br.record_failure()
+    time.sleep(0.06)
+    assert br.state == "half_open"
+    assert br.allow() is True
+    assert br.half_open_inflight == 1
+    assert br.allow() is False
+    br.record_success()
+    assert br.state == "closed"
+    assert br.half_open_inflight == 0
+
+
+def test_max_half_open_allows_bounded_probes():
+    br = CircuitBreaker(
+        failure_threshold=1,
+        recovery_timeout=0.05,
+        success_threshold=2,
+        max_half_open=2,
+    )
+    br.record_failure()
+    time.sleep(0.06)
+    assert br.allow() is True
+    assert br.allow() is True
+    assert br.allow() is False
+    br.record_success()
+    assert br.state == "half_open"
+    br.record_success()
+    assert br.state == "closed"
+
+
+def test_invalid_max_half_open():
+    with pytest.raises(ValueError):
+        CircuitBreaker(max_half_open=0)
 
 
 def test_reset_forces_closed():
@@ -134,6 +173,43 @@ def test_rejected_result_counts_as_failure():
             circuit=br,
         )
     assert br.state == "open"
+
+
+def test_attempt_rejects_surplus_half_open_probes():
+    br = CircuitBreaker(failure_threshold=1, recovery_timeout=0.05, max_half_open=1, name="probe")
+    br.record_failure()
+    time.sleep(0.06)
+    assert br.state == "half_open"
+    assert br.allow() is True
+
+    with pytest.raises(CircuitOpenError) as ei:
+        attempt(Mock(return_value="should-not-run"), max_attempts=2, circuit=br)
+    assert "probe limiti" in str(ei.value)
+    assert ei.value.breaker is br
+    br.record_success()
+    assert br.state == "closed"
+
+
+def test_concurrent_half_open_only_one_probe():
+    br = CircuitBreaker(failure_threshold=1, recovery_timeout=0.05, max_half_open=1)
+    br.record_failure()
+    time.sleep(0.06)
+
+    allowed = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        allowed.append(br.allow())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(1 for ok in allowed if ok) == 1
+    assert br.half_open_inflight == 1
 
 
 @pytest.mark.asyncio

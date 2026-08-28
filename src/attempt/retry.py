@@ -151,11 +151,19 @@ def _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_a
     if circuit is None or circuit.allow():
         return
     wait = circuit.seconds_until_retry()
-    err = CircuitOpenError(
-        f"CircuitBreaker {circuit.name!r} acik; {wait:.3f}s sonra denenebilir",
-        retry_after=wait,
-        breaker=circuit,
-    )
+    if circuit.state == "half_open":
+        err = CircuitOpenError(
+            f"CircuitBreaker {circuit.name!r} half-open probe limiti dolu "
+            f"(max_half_open={circuit.max_half_open})",
+            retry_after=wait if wait > 0 else None,
+            breaker=circuit,
+        )
+    else:
+        err = CircuitOpenError(
+            f"CircuitBreaker {circuit.name!r} acik; {wait:.3f}s sonra denenebilir",
+            retry_after=wait,
+            breaker=circuit,
+        )
     done = max(0, attempt_num - 1)
     if reraise_as_retry_error:
         raise RetryError(err, done, last_result, history=history) from err

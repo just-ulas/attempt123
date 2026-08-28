@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "attempt123"
-version = "0.10.0"
+version = "0.11.0"
 description = "Basit, bağımlılıksız ve üretim kalitesinde retry / attempt yardımcı kütüphanesi (sync + async, circuit breaker, rate limiter)"
 readme = "README.md"
 requires-python = ">=3.8"
