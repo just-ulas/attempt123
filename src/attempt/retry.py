@@ -4,6 +4,7 @@ import asyncio
 import functools
 import inspect
 import random
+import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -141,7 +142,7 @@ def _should_retry_result(result, retry_if_result):
     return bool(retry_if_result(result))
 
 
-def _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout):
+def _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout, attempt_timeout=None):
     if max_attempts < 1:
         raise ValueError("max_attempts en az 1 olmalidir")
     if base_delay < 0:
@@ -152,6 +153,45 @@ def _validate_params(max_attempts, base_delay, max_delay, exponential_base, time
         raise ValueError("exponential_base en az 1 olmalidir")
     if timeout is not None and timeout < 0:
         raise ValueError("timeout negatif olamaz")
+    if attempt_timeout is not None and attempt_timeout <= 0:
+        raise ValueError("attempt_timeout pozitif olmalidir")
+
+
+def _call_sync_with_timeout(func, attempt_timeout):
+    """Run func(); if attempt_timeout is set, abort waiting after that many seconds.
+
+    The worker is a daemon thread so a hung call cannot keep the process alive.
+    The thread itself cannot be killed from userland; the retry loop moves on.
+    """
+    if attempt_timeout is None:
+        return func()
+    box = {}
+    done = threading.Event()
+
+    def run():
+        try:
+            box["value"] = func()
+        except BaseException as exc:
+            box["exc"] = exc
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    if not done.wait(attempt_timeout):
+        raise TimeoutError(f"Deneme zamanaşımı ({attempt_timeout}s) aşıldı")
+    if "exc" in box:
+        raise box["exc"]
+    return box["value"]
+
+
+async def _call_async_with_timeout(func, attempt_timeout):
+    if attempt_timeout is None:
+        return await func()
+    try:
+        return await asyncio.wait_for(func(), timeout=attempt_timeout)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"Deneme zamanaşımı ({attempt_timeout}s) aşıldı") from exc
 
 
 def _resolve_delay(attempt_num, base_delay, max_delay, exponential_base, jitter, last_exc, last_result, retry_after):
@@ -268,6 +308,44 @@ async def _give_up_or_fallback_async(fallback, attempt_num, last_exc, last_resul
     _give_up(attempt_num, last_exc, last_result, history, reraise_as_retry_error)
 
 
+def _overall_timeout_sync(fallback, timeout, attempt_num, last_exc, last_result, history, reraise_as_retry_error):
+    done = max(0, attempt_num - 1)
+    if last_exc is None and last_result is None:
+        last_exc = TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+    return _give_up_or_fallback(fallback, done, last_exc, last_result, history, reraise_as_retry_error)
+
+
+async def _overall_timeout_async(fallback, timeout, attempt_num, last_exc, last_result, history, reraise_as_retry_error):
+    done = max(0, attempt_num - 1)
+    if last_exc is None and last_result is None:
+        last_exc = TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+    return await _give_up_or_fallback_async(
+        fallback, done, last_exc, last_result, history, reraise_as_retry_error
+    )
+
+
+_RETRY_KW = dict(
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    exceptions=(Exception,),
+    retry_if=None,
+    retry_if_result=None,
+    retry_after=None,
+    on_retry=None,
+    timeout=None,
+    attempt_timeout=None,
+    reraise_as_retry_error=False,
+    circuit=None,
+    limiter=None,
+    budget=None,
+    fallback=None,
+    bulkhead=None,
+)
+
+
 def attempt(
     func,
     *,
@@ -282,6 +360,7 @@ def attempt(
     retry_after=None,
     on_retry=None,
     timeout=None,
+    attempt_timeout=None,
     reraise_as_retry_error=False,
     circuit=None,
     limiter=None,
@@ -289,7 +368,7 @@ def attempt(
     fallback=None,
     bulkhead=None,
 ):
-    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
+    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout, attempt_timeout)
     start_time = time.monotonic()
     last_exc = None
     last_result = None
@@ -300,15 +379,9 @@ def attempt(
     for attempt_num in range(1, max_attempts + 1):
         _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_as_retry_error)
         if timeout is not None and (time.monotonic() - start_time) >= timeout:
-            if last_exc is not None:
-                if reraise_as_retry_error:
-                    raise RetryError(last_exc, attempt_num - 1, history=history) from last_exc
-                raise last_exc
-            if last_result is not None or retry_if_result is not None:
-                if reraise_as_retry_error:
-                    raise RetryError(None, attempt_num - 1, last_result, history=history)
-                raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
-            raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+            return _overall_timeout_sync(
+                fallback, timeout, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+            )
 
         if limiter is not None:
             budget_wait = _limiter_wait_budget(timeout, start_time)
@@ -324,7 +397,7 @@ def attempt(
 
         try:
             try:
-                result = func()
+                result = _call_sync_with_timeout(func, attempt_timeout)
                 if not _should_retry_result(result, retry_if_result):
                     if circuit is not None:
                         circuit.record_success()
@@ -371,13 +444,9 @@ def attempt(
             if timeout is not None:
                 remaining = timeout - (time.monotonic() - start_time)
                 if remaining <= 0:
-                    if last_exc is not None:
-                        if reraise_as_retry_error:
-                            raise RetryError(last_exc, attempt_num, history=history) from last_exc
-                        raise last_exc
-                    if reraise_as_retry_error:
-                        raise RetryError(None, attempt_num, last_result, history=history)
-                    raise RuntimeError("Timeout asildi; sonuc kabul edilmedi")
+                    return _overall_timeout_sync(
+                        fallback, timeout, attempt_num + 1, last_exc, last_result, history, reraise_as_retry_error
+                    )
                 delay = min(delay, remaining)
             time.sleep(delay)
 
@@ -386,17 +455,77 @@ def attempt(
     )
 
 
-def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
+def retry(
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    exceptions=(Exception,),
+    retry_if=None,
+    retry_if_result=None,
+    retry_after=None,
+    on_retry=None,
+    timeout=None,
+    attempt_timeout=None,
+    reraise_as_retry_error=False,
+    circuit=None,
+    limiter=None,
+    budget=None,
+    fallback=None,
+    bulkhead=None,
+):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback, bulkhead=bulkhead)
+            return attempt(
+                lambda: func(*args, **kwargs),
+                max_attempts=max_attempts,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                exponential_base=exponential_base,
+                jitter=jitter,
+                exceptions=exceptions,
+                retry_if=retry_if,
+                retry_if_result=retry_if_result,
+                retry_after=retry_after,
+                on_retry=on_retry,
+                timeout=timeout,
+                attempt_timeout=attempt_timeout,
+                reraise_as_retry_error=reraise_as_retry_error,
+                circuit=circuit,
+                limiter=limiter,
+                budget=budget,
+                fallback=fallback,
+                bulkhead=bulkhead,
+            )
         return wrapper
     return decorator
 
 
-async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
-    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
+async def async_attempt(
+    func,
+    *,
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    exceptions=(Exception,),
+    retry_if=None,
+    retry_if_result=None,
+    retry_after=None,
+    on_retry=None,
+    timeout=None,
+    attempt_timeout=None,
+    reraise_as_retry_error=False,
+    circuit=None,
+    limiter=None,
+    budget=None,
+    fallback=None,
+    bulkhead=None,
+):
+    _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout, attempt_timeout)
     start_time = time.monotonic()
     last_exc = None
     last_result = None
@@ -407,15 +536,9 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
     for attempt_num in range(1, max_attempts + 1):
         _raise_if_circuit_open(circuit, attempt_num, last_result, history, reraise_as_retry_error)
         if timeout is not None and (time.monotonic() - start_time) >= timeout:
-            if last_exc is not None:
-                if reraise_as_retry_error:
-                    raise RetryError(last_exc, attempt_num - 1, history=history) from last_exc
-                raise last_exc
-            if last_result is not None or retry_if_result is not None:
-                if reraise_as_retry_error:
-                    raise RetryError(None, attempt_num - 1, last_result, history=history)
-                raise RuntimeError(f"Toplam timeout ({timeout}s) asildi; sonuc kabul edilmedi")
-            raise TimeoutError(f"Toplam timeout ({timeout}s) asildi")
+            return await _overall_timeout_async(
+                fallback, timeout, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+            )
 
         if limiter is not None:
             budget_wait = _limiter_wait_budget(timeout, start_time)
@@ -431,7 +554,7 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
 
         try:
             try:
-                result = await func()
+                result = await _call_async_with_timeout(func, attempt_timeout)
                 if not _should_retry_result(result, retry_if_result):
                     if circuit is not None:
                         circuit.record_success()
@@ -478,13 +601,9 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
             if timeout is not None:
                 remaining = timeout - (time.monotonic() - start_time)
                 if remaining <= 0:
-                    if last_exc is not None:
-                        if reraise_as_retry_error:
-                            raise RetryError(last_exc, attempt_num, history=history) from last_exc
-                        raise last_exc
-                    if reraise_as_retry_error:
-                        raise RetryError(None, attempt_num, last_result, history=history)
-                    raise RuntimeError("Timeout asildi; sonuc kabul edilmedi")
+                    return await _overall_timeout_async(
+                        fallback, timeout, attempt_num + 1, last_exc, last_result, history, reraise_as_retry_error
+                    )
                 delay = min(delay, remaining)
             await asyncio.sleep(delay)
 
@@ -493,10 +612,49 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
     )
 
 
-def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
+def async_retry(
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    exceptions=(Exception,),
+    retry_if=None,
+    retry_if_result=None,
+    retry_after=None,
+    on_retry=None,
+    timeout=None,
+    attempt_timeout=None,
+    reraise_as_retry_error=False,
+    circuit=None,
+    limiter=None,
+    budget=None,
+    fallback=None,
+    bulkhead=None,
+):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback, bulkhead=bulkhead)
+            return await async_attempt(
+                lambda: func(*args, **kwargs),
+                max_attempts=max_attempts,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                exponential_base=exponential_base,
+                jitter=jitter,
+                exceptions=exceptions,
+                retry_if=retry_if,
+                retry_if_result=retry_if_result,
+                retry_after=retry_after,
+                on_retry=on_retry,
+                timeout=timeout,
+                attempt_timeout=attempt_timeout,
+                reraise_as_retry_error=reraise_as_retry_error,
+                circuit=circuit,
+                limiter=limiter,
+                budget=budget,
+                fallback=fallback,
+                bulkhead=bulkhead,
+            )
         return wrapper
     return decorator

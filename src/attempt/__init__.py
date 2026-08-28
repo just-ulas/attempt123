@@ -27,6 +27,7 @@ Kullanım:
         limiter=limiter,
         budget=budget,
         bulkhead=gate,
+        attempt_timeout=2.0,
         fallback=lambda ctx: cached_quote(ctx),
     )
     def fragile():
@@ -40,6 +41,7 @@ Kullanım:
         limiter=limiter,
         budget=budget,
         bulkhead=gate,
+        attempt_timeout=1.5,
         fallback=lambda: default_payload(),
         reraise_as_retry_error=True,
     )
@@ -98,4 +100,4 @@ __all__ = [
     "Bulkhead",
     "BulkheadFullError",
 ]
-__version__ = "0.14.0"
+__version__ = "0.15.0"

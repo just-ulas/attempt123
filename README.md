@@ -8,6 +8,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 
 - **Exponential backoff** + jitter (equal ±%25 veya **AWS full jitter**)
 - Maksimum deneme sayısı ve toplam zaman aşımı kontrolü
+- **`attempt_timeout`**: her denemeyi ayrı sınırlar; asılı I/O tüm bütçeyi yemez (async'te görev iptal edilir)
 - Belirli exception türlerini yakalama / yok sayma
 - **`retry_if` predicate**: exception içeriğine göre yeniden deneme kararı
 - **`retry_if_result` predicate**: başarılı dönüş değerine göre yeniden deneme
@@ -20,7 +21,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
 - **Retry budget**: kayar pencerede retry oranını sınırlar; bozuk bir bağımlılık tüm kapasiteyi retry ile yemesin
 - **Bulkhead**: eşzamanlı uçuştaki çağrı sayısını sınırlar; yavaş bir bağımlılık thread/task havuzunu kilitlemesin
-- **`fallback`**: denemeler veya bütçe bitince hata fırlatmak yerine yedek yol çalıştırır (`GiveUpContext`)
+- **`fallback`**: denemeler, bütçe veya **toplam timeout** bitince hata fırlatmak yerine yedek yol çalıştırır (`GiveUpContext`)
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
@@ -47,6 +48,30 @@ result = attempt(
     lambda: do_call(),
     max_attempts=4,
     base_delay=1.0,
+)
+```
+
+### Deneme başına timeout
+
+`timeout` tüm retry döngüsünün üst sınırıdır. `attempt_timeout` *tek bir çağrıyı* sınırlar.
+Asılı bir socket, `max_attempts` dolmadan önce tüm süreyi yiyebilir; deneme sınırı
+`TimeoutError` üretir, history / circuit / budget'a kaydeder ve (ayarlandıysa)
+yeniden dener veya fallback'e düşer.
+
+Async yolda `asyncio.wait_for` görevi iptal eder. Sync yolda bekleyen işçi daemon
+thread olarak bırakılır — Python kullanıcı kodundan thread öldüremez; döngü yine de ilerler.
+
+```python
+from attempt import attempt
+
+quote = attempt(
+    lambda: market.ticker(symbol),
+    max_attempts=4,
+    base_delay=0.1,
+    jitter="full",
+    attempt_timeout=1.5,
+    timeout=5.0,
+    fallback=lambda: cache.get("last_good_quote"),
 )
 ```
 
@@ -172,9 +197,9 @@ noktalarında paylaşın. Retry dışında `with Bulkhead(...)` veya
 
 ### Fallback
 
-Denemeler tükenince, `retry_if` hayır deyince veya retry bütçesi bitince varsayılan
-davranış hata yükseltmektir. `fallback` verildiğinde bunun yerine yedek yol çalışır:
-önbellek, varsayılan payload, alternatif servis.
+Denemeler tükenince, `retry_if` hayır deyince, retry bütçesi bitince veya **toplam
+timeout** dolunca varsayılan davranış hata yükseltmektir. `fallback` verildiğinde
+bunun yerine yedek yol çalışır: önbellek, varsayılan payload, alternatif servis.
 
 `fallback` ya argümansız çağrılır ya da bir `GiveUpContext` alır (`exception`,
 `result`, `history`, `attempts`). Async yolda fallback kendisi de `async` olabilir.
@@ -206,8 +231,8 @@ def ping():
 ```
 
 Başarılı bir deneme fallback'i çağırmaz. Circuit / rate-limit / bulkhead hataları
-hâlâ kendi exception'larını yükseltir; fallback yalnızca asıl iş fonksiyonunun
-tükettiği denemeler içindir.
+hâlâ kendi exception'larını yükseltir; fallback asıl iş fonksiyonunun tükettiği
+denemeler ve genel deadline içindir.
 
 ## Testler
 
