@@ -8,6 +8,7 @@ Kullanım:
     from attempt import CircuitBreaker, CircuitOpenError
     from attempt import RateLimiter, RateLimitError
     from attempt import RetryBudget, GiveUpContext
+    from attempt import Bulkhead, BulkheadFullError
 
     limiter = RateLimiter(rate=5, burst=10, name="payments")
     breaker = CircuitBreaker(
@@ -17,6 +18,7 @@ Kullanım:
         name="payments",
     )
     budget = RetryBudget(window=10.0, retry_ratio=0.2, min_retries=10, name="payments")
+    gate = Bulkhead(max_concurrent=8, name="payments")
 
     @retry(
         max_attempts=5,
@@ -24,6 +26,7 @@ Kullanım:
         circuit=breaker,
         limiter=limiter,
         budget=budget,
+        bulkhead=gate,
         fallback=lambda ctx: cached_quote(ctx),
     )
     def fragile():
@@ -36,12 +39,14 @@ Kullanım:
         circuit=breaker,
         limiter=limiter,
         budget=budget,
+        bulkhead=gate,
         fallback=lambda: default_payload(),
         reraise_as_retry_error=True,
     )
 """
 
 from .budget import RetryBudget
+from .bulkhead import Bulkhead, BulkheadFullError
 from .circuit import CircuitBreaker, CircuitOpenError, CircuitState
 from .limiter import RateLimitError, RateLimiter
 from .predicates import (
@@ -90,5 +95,7 @@ __all__ = [
     "RateLimiter",
     "RateLimitError",
     "RetryBudget",
+    "Bulkhead",
+    "BulkheadFullError",
 ]
-__version__ = "0.13.0"
+__version__ = "0.14.0"
