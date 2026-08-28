@@ -19,6 +19,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - **Circuit breaker**: ardışık hatalarda çağrıları keser; half-open'da **eşzamanlı probe limiti** (`max_half_open`) ile recovery'yi izole eder; thread-safe
 - **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
 - **Retry budget**: kayar pencerede retry oranını sınırlar; bozuk bir bağımlılık tüm kapasiteyi retry ile yemesin
+- **Bulkhead**: eşzamanlı uçuştaki çağrı sayısını sınırlar; yavaş bir bağımlılık thread/task havuzunu kilitlemesin
 - **`fallback`**: denemeler veya bütçe bitince hata fırlatmak yerine yedek yol çalıştırır (`GiveUpContext`)
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
@@ -137,6 +138,38 @@ result = attempt(
 Aynı `RetryBudget` örneğini tüm çağrı noktalarında paylaşın. Outage sırasında 1000
 istekten yalnızca ~200'si retry eder; kalanı fail-fast olur.
 
+### Bulkhead
+
+Limiter *zaman içindeki hızı* keser. Bulkhead *aynı anda kaç çağrının uçuşta*
+olabileceğini keser. Yavaş bir upstream + retry, worker havuzunu kolayca kilitler;
+paylaşılan bir `Bulkhead` o sızıntıyı izole eder.
+
+Slot yalnızca asıl çağrı süresince tutulur — backoff uykusu kapasite yemez.
+Slot yoksa timeout bütçesi içinde beklenir, yetmezse `BulkheadFullError`.
+
+```python
+from attempt import Bulkhead, BulkheadFullError, attempt
+
+payments = Bulkhead(max_concurrent=8, name="payments")
+
+try:
+    result = attempt(
+        lambda: charge(order),
+        max_attempts=4,
+        base_delay=0.2,
+        jitter="full",
+        bulkhead=payments,
+        timeout=2.0,
+    )
+except BulkheadFullError as exc:
+    # exc.bulkhead.inflight / .available
+    shed_load()
+```
+
+Circuit → limiter → bulkhead sırasıyla kontrol edilir. Aynı örneği tüm çağrı
+noktalarında paylaşın. Retry dışında `with Bulkhead(...)` veya
+`try_acquire()` / `acquire_async()` da kullanılabilir.
+
 ### Fallback
 
 Denemeler tükenince, `retry_if` hayır deyince veya retry bütçesi bitince varsayılan
@@ -172,8 +205,8 @@ def ping():
     ...
 ```
 
-Başarılı bir deneme fallback'i çağırmaz. Circuit / rate-limit hataları hâlâ
-kendi exception'larını yükseltir; fallback yalnızca asıl iş fonksiyonunun
+Başarılı bir deneme fallback'i çağırmaz. Circuit / rate-limit / bulkhead hataları
+hâlâ kendi exception'larını yükseltir; fallback yalnızca asıl iş fonksiyonunun
 tükettiği denemeler içindir.
 
 ## Testler
