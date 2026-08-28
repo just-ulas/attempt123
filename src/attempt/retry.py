@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable, List, Literal, Optional, Tuple, Type, TypeVar, Union
 
+from .bulkhead import Bulkhead, BulkheadFullError
 from .circuit import CircuitBreaker, CircuitOpenError
 from .limiter import RateLimitError, RateLimiter
 
@@ -211,6 +212,18 @@ def _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_r
     raise err
 
 
+def _raise_bulkhead_full(bulkhead, attempt_num, last_result, history, reraise_as_retry_error):
+    err = BulkheadFullError(
+        f"Bulkhead {bulkhead.name!r} dolu "
+        f"(inflight={bulkhead.inflight}/{bulkhead.max_concurrent})",
+        bulkhead=bulkhead,
+    )
+    done = max(0, attempt_num - 1)
+    if reraise_as_retry_error:
+        raise RetryError(err, done, last_result, history=history) from err
+    raise err
+
+
 def _give_up(attempt_num, last_exc, last_result, history, reraise_as_retry_error):
     if last_exc is not None:
         if reraise_as_retry_error:
@@ -274,6 +287,7 @@ def attempt(
     limiter=None,
     budget=None,
     fallback=None,
+    bulkhead=None,
 ):
     _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
     start_time = time.monotonic()
@@ -301,35 +315,48 @@ def attempt(
             if not limiter.acquire(1.0, timeout=budget_wait):
                 _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_retry_error)
 
+        acquired = False
+        if bulkhead is not None:
+            budget_wait = _limiter_wait_budget(timeout, start_time)
+            if not bulkhead.acquire(budget_wait):
+                _raise_bulkhead_full(bulkhead, attempt_num, last_result, history, reraise_as_retry_error)
+            acquired = True
+
         try:
-            result = func()
-            if not _should_retry_result(result, retry_if_result):
+            try:
+                result = func()
+                if not _should_retry_result(result, retry_if_result):
+                    if circuit is not None:
+                        circuit.record_success()
+                    return result
+                last_result = result
+                last_exc = None
                 if circuit is not None:
-                    circuit.record_success()
-                return result
-            last_result = result
-            last_exc = None
-            if circuit is not None:
-                circuit.record_failure()
-            history.append(RetryAttempt(attempt_num, result=result))
-            if attempt_num >= max_attempts:
-                return _give_up_or_fallback(
-                    fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
-                )
-        except CircuitOpenError:
-            raise
-        except RateLimitError:
-            raise
-        except exceptions as exc:
-            last_exc = exc
-            last_result = None
-            if circuit is not None:
-                circuit.record_failure()
-            history.append(RetryAttempt(attempt_num, exception=exc))
-            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
-                return _give_up_or_fallback(
-                    fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
-                )
+                    circuit.record_failure()
+                history.append(RetryAttempt(attempt_num, result=result))
+                if attempt_num >= max_attempts:
+                    return _give_up_or_fallback(
+                        fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+                    )
+            except CircuitOpenError:
+                raise
+            except RateLimitError:
+                raise
+            except BulkheadFullError:
+                raise
+            except exceptions as exc:
+                last_exc = exc
+                last_result = None
+                if circuit is not None:
+                    circuit.record_failure()
+                history.append(RetryAttempt(attempt_num, exception=exc))
+                if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
+                    return _give_up_or_fallback(
+                        fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+                    )
+        finally:
+            if acquired:
+                bulkhead.release()
 
         if budget is not None and not budget.try_retry():
             return _give_up_or_fallback(
@@ -359,16 +386,16 @@ def attempt(
     )
 
 
-def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None):
+def retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback)
+            return attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback, bulkhead=bulkhead)
         return wrapper
     return decorator
 
 
-async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None):
+async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
     _validate_params(max_attempts, base_delay, max_delay, exponential_base, timeout)
     start_time = time.monotonic()
     last_exc = None
@@ -395,35 +422,48 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
             if not await limiter.acquire_async(1.0, timeout=budget_wait):
                 _raise_rate_limited(limiter, attempt_num, last_result, history, reraise_as_retry_error)
 
+        acquired = False
+        if bulkhead is not None:
+            budget_wait = _limiter_wait_budget(timeout, start_time)
+            if not await bulkhead.acquire_async(budget_wait):
+                _raise_bulkhead_full(bulkhead, attempt_num, last_result, history, reraise_as_retry_error)
+            acquired = True
+
         try:
-            result = await func()
-            if not _should_retry_result(result, retry_if_result):
+            try:
+                result = await func()
+                if not _should_retry_result(result, retry_if_result):
+                    if circuit is not None:
+                        circuit.record_success()
+                    return result
+                last_result = result
+                last_exc = None
                 if circuit is not None:
-                    circuit.record_success()
-                return result
-            last_result = result
-            last_exc = None
-            if circuit is not None:
-                circuit.record_failure()
-            history.append(RetryAttempt(attempt_num, result=result))
-            if attempt_num >= max_attempts:
-                return await _give_up_or_fallback_async(
-                    fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
-                )
-        except CircuitOpenError:
-            raise
-        except RateLimitError:
-            raise
-        except exceptions as exc:
-            last_exc = exc
-            last_result = None
-            if circuit is not None:
-                circuit.record_failure()
-            history.append(RetryAttempt(attempt_num, exception=exc))
-            if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
-                return await _give_up_or_fallback_async(
-                    fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
-                )
+                    circuit.record_failure()
+                history.append(RetryAttempt(attempt_num, result=result))
+                if attempt_num >= max_attempts:
+                    return await _give_up_or_fallback_async(
+                        fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+                    )
+            except CircuitOpenError:
+                raise
+            except RateLimitError:
+                raise
+            except BulkheadFullError:
+                raise
+            except exceptions as exc:
+                last_exc = exc
+                last_result = None
+                if circuit is not None:
+                    circuit.record_failure()
+                history.append(RetryAttempt(attempt_num, exception=exc))
+                if attempt_num >= max_attempts or not _should_retry(exc, retry_if):
+                    return await _give_up_or_fallback_async(
+                        fallback, attempt_num, last_exc, last_result, history, reraise_as_retry_error
+                    )
+        finally:
+            if acquired:
+                bulkhead.release()
 
         if budget is not None and not budget.try_retry():
             return await _give_up_or_fallback_async(
@@ -453,10 +493,10 @@ async def async_attempt(func, *, max_attempts=3, base_delay=1.0, max_delay=60.0,
     )
 
 
-def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None):
+def async_retry(max_attempts=3, base_delay=1.0, max_delay=60.0, exponential_base=2.0, jitter=True, exceptions=(Exception,), retry_if=None, retry_if_result=None, retry_after=None, on_retry=None, timeout=None, reraise_as_retry_error=False, circuit=None, limiter=None, budget=None, fallback=None, bulkhead=None):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback)
+            return await async_attempt(lambda: func(*args, **kwargs), max_attempts=max_attempts, base_delay=base_delay, max_delay=max_delay, exponential_base=exponential_base, jitter=jitter, exceptions=exceptions, retry_if=retry_if, retry_if_result=retry_if_result, retry_after=retry_after, on_retry=on_retry, timeout=timeout, reraise_as_retry_error=reraise_as_retry_error, circuit=circuit, limiter=limiter, budget=budget, fallback=fallback, bulkhead=bulkhead)
         return wrapper
     return decorator
