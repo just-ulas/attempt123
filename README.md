@@ -18,6 +18,7 @@ Geçici hataları (ağ, rate-limit, geçici servis kesintileri vb.) otomatik ola
 - Predicate birleştirme: **`any_of` / `all_of` / `not_`**
 - **Circuit breaker**: ardışık hatalarda çağrıları keser; half-open'da **eşzamanlı probe limiti** (`max_half_open`) ile recovery'yi izole eder; thread-safe
 - **Token-bucket rate limiter**: paylaşılan kovadan token alır; retry storm / thundering herd'u keser
+- **Retry budget**: kayar pencerede retry oranını sınırlar; bozuk bir bağımlılık tüm kapasiteyi retry ile yemesin
 - **`RetryError.history`**: her denemenin exception/sonuç/gecikme kaydı
 - Hem decorator hem de fonksiyon arayüzü
 - **Async desteği** (`async_attempt` / `@async_retry`) — sadece standart kütüphane
@@ -106,6 +107,34 @@ except RateLimitError as exc:
 
 Limiter circuit breaker ile birlikte kullanılabilir: önce açık devre kontrolü, sonra token.
 `limiter.try_acquire()` / `acquire_async()` retry dışında da çağrılabilir.
+
+### Retry budget
+
+Limiter *her* denemeyi yavaşlatır. Budget yalnızca yeniden denemeleri keser: penceredeki
+isteklerin en fazla `retry_ratio` kadarı retry olabilir; düşük trafikte `min_retries`
+tabanı korunur. Bütçe bitince son hata hemen yükseltilir — ekstra sleep / ekstra yük yok.
+
+```python
+from attempt import RetryBudget, attempt
+
+payments = RetryBudget(
+    window=10.0,
+    retry_ratio=0.2,
+    min_retries=10,
+    name="payments",
+)
+
+result = attempt(
+    lambda: charge(order),
+    max_attempts=5,
+    base_delay=0.2,
+    jitter="full",
+    budget=payments,
+)
+```
+
+Aynı `RetryBudget` örneğini tüm çağrı noktalarında paylaşın. Outage sırasında 1000
+istekten yalnızca ~200'si retry eder; kalanı fail-fast olur.
 
 ## Testler
 
